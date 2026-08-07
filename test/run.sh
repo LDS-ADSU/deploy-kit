@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Стенд для deploy/*.sh. Подменяет sudo/systemctl/caddy/curl стабами (deploy/test/stub) и гоняет
+# Стенд для lib/*.sh. Подменяет sudo/systemctl/caddy/curl стабами (test/stub) и гоняет
 # сценарии на временном DEPLOY_DIR. Инфраструктура не нужна — запускается где угодно за ~2 минуты.
 #
-#   deploy/test/run.sh
+#   test/run.sh
 #
 # Зачем: эти скрипты переключают ПРОД-трафик, и за один день в них нашлось два бага, доехавших
 # до прода (заякоренная на порядок ключей проверка readiness и грep по несуществующей строке
@@ -12,7 +12,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="${REPO:-$(cd "$HERE/../.." && pwd)}"
+SCRIPTS="${SCRIPTS:-$(cd "$HERE/../lib" && pwd)}"
 PASS=0; FAIL=0
 
 setup() {                       # setup <активный-цвет>
@@ -40,7 +40,7 @@ check() {                       # check <описание> <ожидание> <�
 }
 upstream_port() { sed -n 's#.*:\([0-9]*\)#\1#p' "$CADDY_UPSTREAM"; }
 restarts_of()   { grep -c "systemctl restart adsu-team@$1" "$STUB_LOG" 2>/dev/null | tr -d ' '; }
-deploy()        { bash "$REPO/deploy/deploy.sh" "$DEPLOY_DIR/new.jar" "${1:-abc123456789}" 2>&1; }
+deploy()        { bash "$SCRIPTS/deploy.sh" "$DEPLOY_DIR/new.jar" "${1:-abc123456789}" 2>&1; }
 
 echo "1. штатный деплой blue → green"
 setup blue
@@ -123,7 +123,7 @@ check "апстрим возвращён на blue"      "2333" "$(upstream_port
 echo "9. rollback при живом резерве"
 setup green
 export STUB_READY="blue green"
-out="$(bash "$REPO/deploy/rollback.sh" 2>&1)"; rc=$?
+out="$(bash "$SCRIPTS/rollback.sh" 2>&1)"; rc=$?
 check "код возврата 0"                 "0"    "$rc"
 check "апстрим → blue"                 "2333" "$(upstream_port)"
 check "живой резерв НЕ перезапускали"  "0"    "$(grep -c 'systemctl restart' "$STUB_LOG" | tr -d ' ')"
@@ -132,7 +132,7 @@ check "active обновлён"                "blue" "$(cat "$DEPLOY_DIR/active
 echo "10. rollback при лежащем резерве"
 setup green
 export STUB_READY="green"
-out="$(bash "$REPO/deploy/rollback.sh" 2>&1)"; rc=$?
+out="$(bash "$SCRIPTS/rollback.sh" 2>&1)"; rc=$?
 check "откат прерван"                  "1"    "$rc"
 check "попытка поднять была"           "1"    "$(restarts_of blue)"
 check "апстрим остался на green"       "2343" "$(upstream_port)"
@@ -141,11 +141,11 @@ echo "11. release.sh"
 setup blue
 cp "$DEPLOY_DIR/new.jar" "$DEPLOY_DIR/releases/old111111111.jar"
 export STUB_READY="blue green" STUB_INFO_COMMIT=old111111111ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=2343
-out="$(bash "$REPO/deploy/release.sh" --list 2>&1)"
+out="$(bash "$SCRIPTS/release.sh" --list 2>&1)"
 check "--list показывает архив"        "да" "$(printf '%s' "$out" | grep -q old111111111 && echo да || echo нет)"
-out="$(bash "$REPO/deploy/release.sh" nosuch 2>&1)"; rc=$?
+out="$(bash "$SCRIPTS/release.sh" nosuch 2>&1)"; rc=$?
 check "несуществующий релиз → отказ"   "1"  "$rc"
-out="$(bash "$REPO/deploy/release.sh" old111111111 2>&1)"; rc=$?
+out="$(bash "$SCRIPTS/release.sh" old111111111 2>&1)"; rc=$?
 check "выкатка из архива прошла"       "0"    "$rc"
 check "апстрим → green"                "2343" "$(upstream_port)"
 check "архивный jar не потерян"        "new-jar" "$(cat "$DEPLOY_DIR/releases/old111111111.jar")"
@@ -153,7 +153,7 @@ check "архивный jar не потерян"        "new-jar" "$(cat "$DEPLO
 echo "12. rollback, caddy reload падает"
 setup green
 export STUB_READY="blue green" STUB_CADDY_RELOAD_FAIL=1
-out="$(bash "$REPO/deploy/rollback.sh" 2>&1)"; rc=$?
+out="$(bash "$SCRIPTS/rollback.sh" 2>&1)"; rc=$?
 check "откат провален"                 "1"    "$rc"
 check "апстрим ВЕРНУЛСЯ на green"      "2343" "$(upstream_port)"
 check "active не переписан"            "green" "$(cat "$DEPLOY_DIR/active")"
