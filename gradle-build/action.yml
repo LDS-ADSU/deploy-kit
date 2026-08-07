@@ -44,9 +44,15 @@ inputs:
     default: 'true'
   validate-wrapper:
     description: >-
-      Verify gradle-wrapper.jar against the published Gradle checksums. The wrapper is committed
-      and is executed by every build, including builds on the runner that sits on the production
-      host with sudo rights over the service unit.
+      Verify gradle-wrapper.jar against the published Gradle checksums. Leave true in CI: the
+      wrapper is committed and is executed by every build.
+
+      Set it FALSE on a production host. The check fetches the checksum list over the network and
+      has no timeout of its own — on adsu-ai it hung for 24.8 minutes and the job died on
+      timeout-minutes without Gradle ever starting. It also adds nothing there: a deploy is
+      triggered by a successful CI run on the same commit, so that wrapper has already been
+      validated on a GitHub-hosted runner with reliable egress. Repeating it on the production
+      host buys no security and puts a network dependency on the most sensitive path there is.
     required: false
     default: 'true'
   upload-reports:

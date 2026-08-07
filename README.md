@@ -56,8 +56,9 @@ is the whole difference between the five services.
 - uses: LDS-ADSU/deploy-kit/gradle-build@v1.0.0
   with:
     gradle-args: clean bootJar -x test
-    setup-java: 'false'      # the JDK that runs the service is the one to build with
-    cache: 'false'           # ~/.gradle already survives on a persistent runner
+    setup-java: 'false'        # the JDK that runs the service is the one to build with
+    cache: 'false'             # ~/.gradle already survives on a persistent runner
+    validate-wrapper: 'false'  # already validated by the CI run that triggered this deploy
 - uses: LDS-ADSU/deploy-kit/blue-green@v1.0.0
   with:
     profile: deploy/service.conf
