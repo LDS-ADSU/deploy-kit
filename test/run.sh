@@ -48,7 +48,7 @@ setup() {                       # setup <активный-цвет>
     echo "new-jar" > "$WORK/new.jar"
     unset STUB_STATUS_FIRST STUB_READY STUB_INFO_COMMIT STUB_PROBE_CODE STUB_ADMIN \
           STUB_ADMIN_PORT STUB_CADDY_RELOAD_FAIL STUB_RESTART_FAIL \
-          ALLOW_SAME_RELEASE SKIP_RELEASE_CHECK
+          ALLOW_SAME_RELEASE SKIP_RELEASE_CHECK LOCK_FILE STUB_FLOCK_BUSY
     export HEALTH_TIMEOUT=6 RESTORE_TIMEOUT=6
 }
 
@@ -230,6 +230,28 @@ out="$(env -u SERVICE_PROFILE PATH="$HERE/stub:$PATH" DEPLOY_DIR="$DEPLOY_DIR" \
 check "откат из bin прошёл"            "0"    "$rc"
 check "апстрим вернулся на blue"       "$APP_PORT_BLUE" "$(upstream_port)"
 check "active обновлён"                "blue" "$(cat "$DEPLOY_DIR/active")"
+
+echo "18. каталог сервиса недоступен раннеру на запись (лок не создать)"
+setup blue
+export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
+# Права на $DEPLOY_DIR — забота хоста, и на трёх из пяти прод-хостов записи там у раннера нет.
+# Отказ в этом месте означал бы «сервис нельзя выкатить вообще», поэтому выкат обязан пройти,
+# громко предупредив: теряется только взаимоисключение с ручным откатом.
+export LOCK_FILE=/nonexistent-dir/switch.lock
+out="$(deploy)"; rc=$?
+unset LOCK_FILE
+check "деплой прошёл без лока"          "0"    "$rc"
+check "предупреждение напечатано"       "да"   "$(printf '%s' "$out" | grep -q 'БЕЗ взаимоисключения' && echo да || echo нет)"
+check "это предупреждение, а не отказ"  "нет"  "$(printf '%s' "$out" | grep -q '^!!' && echo да || echo нет)"
+check "трафик переключён"               "$APP_PORT_GREEN" "$(upstream_port)"
+
+echo "19. лок уже держит другой процесс (деплой и ручной откат разом)"
+setup blue
+export STUB_READY="blue green" STUB_FLOCK_BUSY=1
+out="$(deploy)"; rc=$?
+check "деплой отказал"                  "1"    "$rc"
+check "ничего не перезапускали"         "0"    "$(grep -c 'systemctl restart' "$STUB_LOG" | tr -d ' ')"
+check "апстрим не тронут"               "$APP_PORT_BLUE" "$(upstream_port)"
 
 echo
 printf 'Итого: \033[32m%d ok\033[0m, \033[31m%d fail\033[0m\n' "$PASS" "$FAIL"
