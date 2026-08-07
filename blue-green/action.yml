@@ -1,0 +1,105 @@
+name: Blue-green deploy
+description: >-
+  Roll a jar into the standby colour, gate it, and switch Caddy to it — the shared implementation
+  behind every backend deploy in the kit.
+
+  Runs on a self-hosted runner that lives on the production host: the build and the switch are
+  local, so neither a registry nor inbound SSH is involved. Everything service-specific comes from
+  the profile named by the `profile` input; the scripts themselves know nothing about any one
+  service.
+
+inputs:
+  profile:
+    description: >-
+      Path to the service profile (service.conf), absolute or relative to the workspace. It is a
+      sourced shell file of `: "${KEY:=value}"` assignments, so anything already in the
+      environment wins over it.
+    required: true
+  release-id:
+    description: >-
+      Commit SHA of the build being deployed, truncated to 12 characters for the release id.
+      Under workflow_run this must be workflow_run.head_sha, not github.sha, which points at the
+      HEAD of the default branch rather than at the commit CI verified.
+    required: true
+  jar:
+    description: >-
+      Path to the jar. Left empty, the action takes the single non-plain jar from build/libs,
+      which is what building in a previous step produces.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the artifact and the profile
+      id: resolve
+      shell: bash
+      env:
+        PROFILE_IN: ${{ inputs.profile }}
+        JAR_IN: ${{ inputs.jar }}
+      run: |
+        set -euo pipefail
+        case "$PROFILE_IN" in
+          /*) profile="$PROFILE_IN" ;;
+          *)  profile="$GITHUB_WORKSPACE/$PROFILE_IN" ;;
+        esac
+        [ -r "$profile" ] || { echo "!! профиль $profile не читается"; exit 1; }
+
+        if [ -n "$JAR_IN" ]; then
+          jar="$JAR_IN"
+        else
+          jar="$(ls build/libs/*.jar 2>/dev/null | grep -v -- '-plain.jar' | head -n1 || true)"
+        fi
+        [ -n "$jar" ] && [ -f "$jar" ] || { echo "!! артефакт не найден: '${jar:-build/libs/*.jar}'"; exit 1; }
+
+        echo "profile=$profile" >> "$GITHUB_OUTPUT"
+        echo "jar=$jar" >> "$GITHUB_OUTPUT"
+        echo "Артефакт: $jar"
+        echo "Профиль:  $profile"
+
+    # deploy.sh ships with the action, so $GITHUB_ACTION_PATH finds lib/ without a second
+    # checkout and without any token on the production host. It sources its own lib.sh through
+    # BASH_SOURCE, so the sibling files resolve wherever the runner unpacked them.
+    - name: Deploy (standby → gates → caddy switch)
+      shell: bash
+      env:
+        SERVICE_PROFILE: ${{ steps.resolve.outputs.profile }}
+        JAR: ${{ steps.resolve.outputs.jar }}
+        RELEASE_ID: ${{ inputs.release-id }}
+      run: bash "$GITHUB_ACTION_PATH/lib/deploy.sh" "$JAR" "${RELEASE_ID:0:12}"
+
+    # GitHub's notification about a red run omits the one fact that matters — that production
+    # stayed on the previous version. Without it an investigation starts from "the fix did not
+    # help" instead of "the fix was never deployed".
+    - name: Report the deploy outcome
+      if: always()
+      shell: bash
+      env:
+        SERVICE_PROFILE: ${{ steps.resolve.outputs.profile }}
+        RELEASE_ID: ${{ inputs.release-id }}
+        JOB_STATUS: ${{ job.status }}
+      run: |
+        {
+          echo "### Деплой \`${RELEASE_ID:0:12}\` — $JOB_STATUS"
+          if [ "$JOB_STATUS" != "success" ]; then
+            echo
+            echo "**Прод остался на предыдущей версии** — трафик не переключался."
+          fi
+          # The profile carries DEPLOY_DIR. It is missing only when the resolve step itself
+          # failed, and then there is no deploy state to report anyway.
+          if [ -n "${SERVICE_PROFILE:-}" ] && [ -r "${SERVICE_PROFILE:-}" ]; then
+            # shellcheck source=/dev/null
+            . "$SERVICE_PROFILE"
+            echo
+            echo "| цвет | релиз |"
+            echo "|---|---|"
+            for c in blue green; do
+              echo "| \`$c\` | \`$(cat "$DEPLOY_DIR/$c/RELEASE" 2>/dev/null || echo '?')\` |"
+            done
+            echo
+            echo "Активный апстрим: \`$(grep -E '^[[:space:]]*to' \
+              "${CADDY_UPSTREAM:-$DEPLOY_DIR/caddy/active-upstream.caddy}" 2>/dev/null || echo '?')\`"
+            echo
+            echo "Откат на хосте: \`$DEPLOY_DIR/bin/rollback.sh\` (скрипты и профиль обновляются там после каждого удачного деплоя)"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY" || true   # сводка не имеет права покрасить успешный деплой

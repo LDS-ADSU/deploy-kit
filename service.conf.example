@@ -1,0 +1,51 @@
+# Example service profile. Copy it into a service repository as deploy/service.conf and fill in
+# the values; the workflow then points the blue-green action at that path.
+#
+# The `: "${KEY:=value}"` form is load-bearing. It assigns only when the variable is unset, so
+# ANYTHING already in the environment wins over the profile — which is what lets deploy.yml keep
+# passing DEPLOY_DIR and the test harness keep redirecting everything into a temporary directory
+# without either of them knowing that profiles exist.
+#
+# lib.sh also lints against this file (`# shellcheck source=../service.conf.example`), so keeping
+# it complete is not cosmetic: a key documented here is a key shellcheck can resolve.
+
+# ---- required ----------------------------------------------------------------------------
+# systemd template unit. The colour is appended: adsu-team@blue, adsu-team@green.
+: "${SERVICE_UNIT:=adsu-team}"
+
+# Application root on the host: releases/, blue/, green/, caddy/, bin/ live under it.
+: "${DEPLOY_DIR:=/opt/backend/adsu-team}"
+
+# File name of the jar inside each colour directory. deploy.sh also keeps <JAR_NAME>.prev there
+# as the fallback that saves the warm standby when a new build fails to start.
+: "${JAR_NAME:=team.jar}"
+
+# Ports the two colours listen on. detect_active maps the live Caddy upstream back to a colour
+# through exactly these two numbers, so they must match the unit's env files.
+: "${APP_PORT_BLUE:=2333}"
+: "${APP_PORT_GREEN:=2343}"
+
+# ---- optional ----------------------------------------------------------------------------
+# Management (Actuator) ports. Omit both when Actuator shares the application port — that is
+# status-monitor's case, and lib.sh then falls back to APP_PORT_*.
+: "${MGMT_PORT_BLUE:=2334}"
+: "${MGMT_PORT_GREEN:=2344}"
+
+# Seconds to wait for /actuator/health/readiness on the standby colour before giving up. Bound it
+# by what a cold start really costs: Liquibase, connection pools, any warm-up.
+: "${HEALTH_TIMEOUT:=600}"
+
+# Smoke request on the REAL application port, after readiness and before traffic moves. The
+# management port lives on its own socket and knows nothing about the application's base-path, so
+# a wrong SERVER_PORT or a broken base-path survives every other gate.
+#
+# Leave SMOKE_PATH empty when the service has no cheap probe endpoint: the step is then skipped
+# with an explicit message rather than silently, because a silent skip reads as "the smoke
+# passed" when nothing was checked.
+#
+# SMOKE_EXPECT is a space-separated list of acceptable codes. For team, 407 is what
+# LocalNetworkWebFilter answers to a request from 127.0.0.1 (loopback is not in
+# security.allowed-networks) and 200 is what it answers once loopback is added — either proves
+# the application is up on the right port.
+: "${SMOKE_PATH:=/v1/team/local/probe}"
+: "${SMOKE_EXPECT:=200 407}"

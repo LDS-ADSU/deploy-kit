@@ -1,0 +1,78 @@
+name: Lockstep version check
+description: >-
+  Fail the build when the version of a shared-kernel artifact pinned in this repository is not the
+  latest release published to GitHub Packages.
+
+  Two services that share a database schema through a common kernel must run the SAME kernel
+  version: diverging versions mean two implementations of the same business rules over one set of
+  tables. That has already happened between asu-api and asu-team, and nothing caught it.
+
+inputs:
+  artifact:
+    description: 'Maven coordinates without the version, e.g. ru.adygnet:studlife-core'
+    required: true
+  repository:
+    description: 'owner/repo that publishes the package, e.g. LDS-ADSU/studlife-core'
+    required: true
+  token:
+    description: >-
+      Token with read:packages for that package. Pass
+      "${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}" — the default token works only
+      where the package grants Actions access to the calling repository.
+    required: true
+  build-file:
+    description: File the pin is read from.
+    required: false
+    default: build.gradle.kts
+
+runs:
+  using: composite
+  steps:
+    - name: Check ${{ inputs.artifact }} lockstep version
+      shell: bash
+      env:
+        ACTOR: ${{ github.actor }}
+        PACKAGES_TOKEN: ${{ inputs.token }}
+        ARTIFACT: ${{ inputs.artifact }}
+        PKG_REPO: ${{ inputs.repository }}
+        BUILD_FILE: ${{ inputs.build-file }}
+      run: |
+        set -uo pipefail
+        group="${ARTIFACT%%:*}"
+        name="${ARTIFACT##*:}"
+        group_path="${group//./\/}"
+        # The coordinates go into a regex, so their dots must be literal: an unescaped
+        # ru.adygnet would also match ruXadygnet and quietly read the wrong pin.
+        pattern="$(printf '%s' "$ARTIFACT" | sed 's/\./\\./g')"
+
+        pinned=$(grep -oE "${pattern}:[0-9]+\.[0-9]+\.[0-9]+" "$BUILD_FILE" | head -1 | sed 's/.*://')
+        if [ -z "$pinned" ]; then
+          echo "::error::в $BUILD_FILE не нашёлся пин $ARTIFACT:<версия>"
+          exit 1
+        fi
+
+        # A transport error and a genuine version drift must not look the same. Losing package
+        # access fails the dependency resolve too, so the build would not pass either way — and
+        # this step has to name that cause instead of claiming "the versions diverged".
+        url="https://maven.pkg.github.com/${PKG_REPO}/${group_path}/${name}/maven-metadata.xml"
+        if ! meta=$(curl -fsS -u "$ACTOR:$PACKAGES_TOKEN" "$url" 2>&1); then
+          echo "::error::не удалось прочитать $url: $meta"
+          echo "::error::обычно это 401/403: у пакета нет Actions access на этот репозиторий, либо токен протух (нужен read:packages)."
+          exit 1
+        fi
+
+        # GitHub Packages generates the metadata itself and emits no <release> tag — only
+        # <latest> and the <versions> list. <latest> is unusable: it points at the last publish,
+        # SNAPSHOTs included, and this gate must never demand pinning a snapshot. So take the
+        # highest strictly-release X.Y.Z.
+        latest=$(printf '%s' "$meta" | tr '<' '\n' | sed -n 's:^version>\(.*\):\1:p' \
+                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+        echo "пин: $pinned; последний релиз: ${latest:-<не найден>}"
+        if [ -z "$latest" ]; then
+          echo "::error::в maven-metadata.xml нет ни одной релизной версии X.Y.Z — формат ответа изменился"
+          exit 1
+        fi
+        if [ "$pinned" != "$latest" ]; then
+          echo "::error::$name рассинхронизирован: здесь запинен $pinned, актуальный релиз $latest. Схема общая — обе службы обязаны быть на одной версии ядра."
+          exit 1
+        fi

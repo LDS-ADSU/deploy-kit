@@ -24,7 +24,9 @@ fi
 # Приводим к абсолютному: install_bin копирует профиль на хост, а deploy.sh мог быть запущен
 # из любого каталога — относительный путь после смены cwd указывал бы в никуда.
 SERVICE_PROFILE="$(cd "$(dirname "$SERVICE_PROFILE")" && pwd)/$(basename "$SERVICE_PROFILE")"
-# shellcheck source=/dev/null
+# Линтуем против примера профиля, а не против /dev/null: иначе shellcheck считает SERVICE_UNIT,
+# JAR_NAME и порты неприсвоенными (SC2154) во всех четырёх скриптах сразу.
+# shellcheck source=../service.conf.example
 . "$SERVICE_PROFILE"
 
 # An incomplete profile must fail here, not halfway through a deploy: an empty DEPLOY_DIR would

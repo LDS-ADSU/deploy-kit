@@ -1,0 +1,110 @@
+name: Gradle build
+description: >-
+  Validate the wrapper, set up a JDK, restore the Gradle cache and run Gradle. The build half of
+  every pipeline in the kit, on GitHub-hosted CI runners and on the production hosts alike.
+
+inputs:
+  gradle-args:
+    description: >-
+      Arguments passed to ./gradlew — "build" in CI, "clean bootJar -x test" on the deploy host.
+      Passed unquoted on purpose: it is a list of tasks and flags, not a single argument.
+    required: true
+  packages-token:
+    description: >-
+      Token used to resolve dependencies from GitHub Packages. Pass
+      "${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}" from the calling workflow —
+      secrets are not readable inside a composite action, so they can only arrive as an input.
+      Leave empty for services that resolve everything from Maven Central (adsu-sso).
+    required: false
+    default: ''
+  java-version:
+    description: JDK version for setup-java. Ignored when setup-java is false.
+    required: false
+    default: '21'
+  java-distribution:
+    description: JDK distribution for setup-java.
+    required: false
+    default: temurin
+  setup-java:
+    description: >-
+      Install a JDK. Leave true on GitHub-hosted runners. Set false on a production host, where
+      the JDK that runs the service is already installed and is the one the build must use — a
+      second JDK dropped in by the action would build against a toolchain nothing runs.
+    required: false
+    default: 'true'
+  cache:
+    description: >-
+      Restore ~/.gradle through actions/cache. True on ephemeral runners. Set false on a
+      persistent self-hosted runner, where the real cache directory already survives between
+      runs and the action would only add tarball churn.
+    required: false
+    default: 'true'
+  validate-wrapper:
+    description: >-
+      Verify gradle-wrapper.jar against the published Gradle checksums. The wrapper is committed
+      and is executed by every build, including builds on the runner that sits on the production
+      host with sudo rights over the service unit.
+    required: false
+    default: 'true'
+  upload-reports:
+    description: >-
+      Upload the test reports when the run fails or is cancelled. Worth it on an ephemeral
+      runner, where the reports die with the machine; pointless on a persistent one.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Gradle wrapper
+      if: inputs.validate-wrapper == 'true'
+      uses: gradle/actions/wrapper-validation@v4
+
+    - name: Set up JDK ${{ inputs.java-version }}
+      if: inputs.setup-java == 'true'
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.java-distribution }}
+
+    - name: Cache Gradle
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Make gradlew executable
+      shell: bash
+      run: chmod +x gradlew
+
+    # GRADLE_ARGS reaches the shell through the environment rather than through ${{ }}
+    # interpolation, so its contents can never be spliced into the command line as syntax.
+    # It is then left unquoted deliberately — quoting would hand Gradle one long argument.
+    - name: Run Gradle
+      shell: bash
+      env:
+        # build.gradle.kts reads GITHUB_ACTOR/GITHUB_TOKEN as a fallback after gpr.user/gpr.key.
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_TOKEN: ${{ inputs.packages-token }}
+        GRADLE_ARGS: ${{ inputs.gradle-args }}
+      run: ./gradlew $GRADLE_ARGS
+
+    - name: Upload test reports
+      # failure() alone does not cover cancellation by timeout-minutes, which is exactly where
+      # a missing report hurts most.
+      if: ${{ inputs.upload-reports == 'true' && (failure() || cancelled()) }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-reports
+        path: |
+          build/reports/tests/test
+          build/test-results/test
+        # A compile-time failure leaves no report directories at all — that is no reason to fail
+        # this step and mask the original error.
+        if-no-files-found: warn
+        retention-days: 7

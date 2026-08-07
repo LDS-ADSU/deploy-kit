@@ -1,0 +1,76 @@
+name: self-test
+
+# The kit switches production traffic for five services, so it has to be at least as well tested
+# as the thing it replaced. Two commits into its life the profile matrix already caught a literal
+# team.jar that survived the generalisation and would have destroyed the warm standby of every
+# service except team on the very first deploy.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: shellcheck + profile matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    # One job, three steps — not three jobs and not a GitHub matrix over the profiles. Each job
+    # bills its own runner minute rounded up, and the harness already reports one line per
+    # profile with a full dump only for the one that failed. Same reasoning that makes the kit
+    # composite actions instead of reusable workflows.
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Lint the shell
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          fi
+          shellcheck --version
+          # -x обязателен: скрипты подключают lib.sh, а lib.sh — профиль. Без обхода
+          # source-директив shellcheck не видит ни функций, ни переменных профиля и
+          # заваливает прогон ложными SC2154.
+          shellcheck -x -S warning lib/*.sh test/run.sh test/matrix.sh test/stub/*
+
+      # A composite action's manifest is only validated when something calls it, and the classic
+      # mistake — a `run` step with no `shell` — fails at that point, on the production host,
+      # mid-deploy. Parsing the manifests here turns that into a pull-request failure.
+      - name: Validate the action manifests
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = 0
+          for path in sorted(glob.glob("*/action.yml")):
+              try:
+                  m = yaml.safe_load(open(path))
+              except Exception as e:
+                  print(f"::error file={path}::не парсится: {e}"); bad = 1; continue
+              for key in ("name", "description", "runs"):
+                  if not m.get(key):
+                      print(f"::error file={path}::нет обязательного поля {key}"); bad = 1
+              runs = m.get("runs") or {}
+              if runs.get("using") != "composite":
+                  print(f"::error file={path}::runs.using = {runs.get('using')!r}, ожидался composite"); bad = 1
+              for i, step in enumerate(runs.get("steps") or [], 1):
+                  if "run" in step and not step.get("shell"):
+                      print(f"::error file={path}::шаг {i} ({step.get('name','без имени')}) с run: без shell:")
+                      bad = 1
+              print(f"  ok  {path}: {len(runs.get('steps') or [])} шагов")
+          sys.exit(bad)
+          PY
+
+      - name: Run the harness across every profile
+        run: bash test/matrix.sh
