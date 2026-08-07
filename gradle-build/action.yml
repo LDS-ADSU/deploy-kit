@@ -92,7 +92,17 @@ runs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_TOKEN: ${{ inputs.packages-token }}
         GRADLE_ARGS: ${{ inputs.gradle-args }}
-      run: ./gradlew $GRADLE_ARGS
+      run: |
+        # Unquoted expansion gives word splitting, which is what we want — but it also gives
+        # pathname expansion, which we very much do not. A Gradle test filter such as
+        #   --tests ru.adygnet.team.architecture.*
+        # would expand against the working directory the moment any file happens to match, and
+        # the build would silently run a DIFFERENT filter than the one written down. Verified
+        # under bash: with a matching file present the pattern is replaced by the file name;
+        # with `set -f` it arrives intact. Quoting inside gradle-args is not the alternative —
+        # the quotes would reach Gradle as part of the argument.
+        set -f
+        ./gradlew $GRADLE_ARGS
 
     - name: Upload test reports
       # failure() alone does not cover cancellation by timeout-minutes, which is exactly where
