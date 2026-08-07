@@ -6,15 +6,37 @@
 # Здесь собрано ровно то, что раньше дублировалось между deploy.sh и rollback.sh и в двух копиях
 # разъезжалось (разные бюджеты health-check, разные эндпоинты, разный порядок записи состояния).
 
-DEPLOY_DIR="${DEPLOY_DIR:-/opt/backend/adsu-team}"
+# The service profile is the only thing that differs between the five backends. It is a
+# sourced shell file of `: "${KEY:=value}"` assignments, so the ENVIRONMENT always wins over
+# the profile — deploy.yml keeps passing DEPLOY_DIR and the test harness keeps pointing the
+# whole thing at a temporary directory, and neither has to learn that profiles exist.
+: "${SERVICE_PROFILE:?не задан SERVICE_PROFILE — укажите путь к service.conf сервиса}"
+[ -r "$SERVICE_PROFILE" ] || { echo "!! профиль $SERVICE_PROFILE не читается" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$SERVICE_PROFILE"
+
+# An incomplete profile must fail here, not halfway through a deploy: an empty DEPLOY_DIR would
+# root every path below at /, and an empty SERVICE_UNIT would hand systemctl the literal unit
+# `@green` — both discovered only once something had already been moved or restarted.
+for _key in SERVICE_UNIT DEPLOY_DIR JAR_NAME APP_PORT_BLUE APP_PORT_GREEN; do
+    [ -n "${!_key:-}" ] || { echo "!! в профиле $SERVICE_PROFILE не задан $_key" >&2; exit 1; }
+done
+unset _key
+
+# A separate management port is optional: status-monitor serves Actuator on the application port
+# itself, so its profile omits MGMT_PORT_* and both resolve to the same socket.
+: "${MGMT_PORT_BLUE:=$APP_PORT_BLUE}"
+: "${MGMT_PORT_GREEN:=$APP_PORT_GREEN}"
+: "${HEALTH_TIMEOUT:=600}"
+
 CADDYFILE="${CADDYFILE:-/etc/caddy/Caddyfile}"
 CADDY_UPSTREAM="${CADDY_UPSTREAM:-$DEPLOY_DIR/caddy/active-upstream.caddy}"
 CADDY_ADMIN="${CADDY_ADMIN:-http://127.0.0.1:2019}"
 ACTIVE_FILE="$DEPLOY_DIR/active"
 LOCK_FILE="${LOCK_FILE:-$DEPLOY_DIR/.switch.lock}"
 
-app_port()  { case "$1" in blue) echo 2333;; green) echo 2343;; esac; }
-mgmt_port() { case "$1" in blue) echo 2334;; green) echo 2344;; esac; }
+app_port()  { case "$1" in blue) echo "$APP_PORT_BLUE";;  green) echo "$APP_PORT_GREEN";;  esac; }
+mgmt_port() { case "$1" in blue) echo "$MGMT_PORT_BLUE";; green) echo "$MGMT_PORT_GREEN";; esac; }
 other()     { case "$1" in blue) echo green;; green) echo blue;; esac; }
 
 release_of() { cat "$DEPLOY_DIR/$1/RELEASE" 2>/dev/null || echo '?'; }
@@ -56,15 +78,17 @@ acquire_switch_lock() {
 detect_active() {
     local port color noted
     # Порт якорим на КОНЕЦ строки и берём только незакомментированные директивы `to`,
-    # иначе комментарий или порт вида 23331 дали бы неверный цвет.
+    # иначе комментарий или порт вида 23331 дали бы неверный цвет. Ширина 2–5 цифр, а не ровно
+    # четыре: порты сервисов кита идут от 2050 до 9011, и жёсткая четвёрка молча отрезала бы
+    # любой пятизначный — деплой встал бы на «не могу определить активный цвет».
     port="$(grep -E '^[[:space:]]*to[[:space:]]' "$CADDY_UPSTREAM" 2>/dev/null \
-        | sed -n 's/.*127\.0\.0\.1:\([0-9]\{4\}\)[[:space:]]*$/\1/p' | head -n1)"
+        | sed -n 's/.*127\.0\.0\.1:\([0-9]\{2,5\}\)[[:space:]]*$/\1/p' | head -n1)"
     case "$port" in
-        2333) color=blue ;;
-        2343) color=green ;;
+        "$APP_PORT_BLUE")  color=blue ;;
+        "$APP_PORT_GREEN") color=green ;;
         *)
             die "не могу определить активный цвет: в $CADDY_UPSTREAM нет строки вида" \
-                "'to 127.0.0.1:2333' (найдено: '${port:-ничего}')"
+                "'to 127.0.0.1:$APP_PORT_BLUE' (найдено: '${port:-ничего}')"
             cont "Это единственный достоверный признак того, куда сейчас идёт трафик," >&2
             cont "поэтому дальше не иду. Почините файл и повторите запуск." >&2
             return 1
@@ -110,8 +134,8 @@ is_healthy() {
 # Restart=on-failure означает, что упавшая на старте сборка будет подниматься снова и снова,
 # и досиживать бюджет до конца бессмысленно.
 wait_healthy() {
-    local color="$1" timeout="${2:-600}" unit deadline nr0 nr
-    unit="adsu-team@$color"
+    local color="$1" timeout="${2:-$HEALTH_TIMEOUT}" unit deadline nr0 nr
+    unit="$SERVICE_UNIT@$color"
     nr0="$(systemctl show -p NRestarts --value "$unit" 2>/dev/null || true)"
     deadline=$(( $(date +%s) + timeout ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -148,10 +172,14 @@ diagnose_color() {
         echo "     код: $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || echo 'нет соединения')"
         echo "     тело: $(curl -s --max-time 5 "$url" 2>/dev/null | head -c 600 || true)"
     done
-    echo "   app-порт $aport: код $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-        "http://127.0.0.1:$aport/v1/team/local/probe" 2>/dev/null || echo 'нет соединения')"
-    echo "   systemctl status adsu-team@$color:"
-    systemctl status "adsu-team@$color" --no-pager -n 30 2>&1 | sed 's/^/     /' || true
+    # Смоук-путь есть не у каждого сервиса: без него по app-порту стучаться некуда, и строка
+    # просто не печатается — лучше, чем показывать 404 на выдуманном пути.
+    if [ -n "${SMOKE_PATH:-}" ]; then
+        echo "   app-порт $aport: код $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            "http://127.0.0.1:$aport$SMOKE_PATH" 2>/dev/null || echo 'нет соединения')"
+    fi
+    echo "   systemctl status $SERVICE_UNIT@$color:"
+    systemctl status "$SERVICE_UNIT@$color" --no-pager -n 30 2>&1 | sed 's/^/     /' || true
     echo "-------------------------------------------------------------------------"
 }
 

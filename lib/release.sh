@@ -13,7 +13,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_DIR="${DEPLOY_DIR:-/opt/backend/adsu-team}"
+# shellcheck source=lib.sh
+source "$HERE/lib.sh"       # даёт DEPLOY_DIR из профиля и проверяет, что профиль полон
 RELEASES_DIR="$DEPLOY_DIR/releases"
 
 list_releases() {

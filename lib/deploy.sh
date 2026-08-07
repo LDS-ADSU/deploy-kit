@@ -23,7 +23,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 RELEASES_DIR="$DEPLOY_DIR/releases"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-180}"
 
 # Битая сборка + Restart=on-failure = вечный цикл перезапусков, и тёплого резерва больше нет:
@@ -32,8 +31,8 @@ restore_standby() {
     local color="$1" prev="$2"
     if [ -f "$prev" ]; then
         cont "Возвращаю предыдущую сборку в $color, чтобы резерв остался живым."
-        mv -f "$prev" "$DEPLOY_DIR/$color/team.jar"
-        if sudo -n systemctl restart "adsu-team@$color" && wait_healthy "$color" "$RESTORE_TIMEOUT"; then
+        mv -f "$prev" "$DEPLOY_DIR/$color/$JAR_NAME"
+        if sudo -n systemctl restart "$SERVICE_UNIT@$color" && wait_healthy "$color" "$RESTORE_TIMEOUT"; then
             cont "$color снова здоров на предыдущей версии ($(release_of "$color"))."
         else
             cont "Значит дело не в новой сборке. Резерва сейчас нет."
@@ -42,8 +41,8 @@ restore_standby() {
     else
         cont "Предыдущей сборки нет, поэтому останавливаю $color: иначе systemd будет"
         cont "перезапускать неработающую сборку до следующего деплоя."
-        sudo -n systemctl stop "adsu-team@$color" \
-            || cont "Остановить не удалось: добавьте 'systemctl stop adsu-team@$color' в sudoers."
+        sudo -n systemctl stop "$SERVICE_UNIT@$color" \
+            || cont "Остановить не удалось: добавьте 'systemctl stop $SERVICE_UNIT@$color' в sudoers."
     fi
 }
 
@@ -75,21 +74,21 @@ else
 fi
 
 # Страховка на случай неудачного старта новой сборки (см. restore_standby)
-prev_jar="$DEPLOY_DIR/$standby/team.jar.prev"
-if [ -f "$DEPLOY_DIR/$standby/team.jar" ]; then
+prev_jar="$DEPLOY_DIR/$standby/$JAR_NAME.prev"
+if [ -f "$DEPLOY_DIR/$standby/$JAR_NAME" ]; then
     install -m 0644 "$DEPLOY_DIR/$standby/team.jar" "$prev_jar"
 fi
 
 # Атомарная подмена jar standby-цвета
-install -m 0644 "$JAR_SRC" "$DEPLOY_DIR/$standby/team.jar.new"
-mv -f "$DEPLOY_DIR/$standby/team.jar.new" "$DEPLOY_DIR/$standby/team.jar"
+install -m 0644 "$JAR_SRC" "$DEPLOY_DIR/$standby/$JAR_NAME.new"
+mv -f "$DEPLOY_DIR/$standby/$JAR_NAME.new" "$DEPLOY_DIR/$standby/$JAR_NAME"
 
 # Проверяем код рестарта явно: к этому моменту jar уже подменён, и голая команда под set -e
 # оборвала бы скрипт ДО restore_standby, оставив резерв с неподнятой новой сборкой.
-step "перезапускаю adsu-team@$standby на новой сборке; трафик пока на $active"
-if ! sudo -n systemctl restart "adsu-team@$standby"; then
-    die "не удалось перезапустить adsu-team@$standby"
-    cont "Смотрите systemctl status adsu-team@$standby и права sudo у пользователя раннера."
+step "перезапускаю $SERVICE_UNIT@$standby на новой сборке; трафик пока на $active"
+if ! sudo -n systemctl restart "$SERVICE_UNIT@$standby"; then
+    die "не удалось перезапустить $SERVICE_UNIT@$standby"
+    cont "Смотрите systemctl status $SERVICE_UNIT@$standby и права sudo у пользователя раннера."
     restore_standby "$standby" "$prev_jar"
     exit 1
 fi
@@ -100,7 +99,7 @@ if ! wait_healthy "$standby" "$HEALTH_TIMEOUT"; then
     # Подсказку даём ДО диагностики: диагностика длинная, и человек должен сначала увидеть,
     # что прод цел, а уже потом разбираться.
     die "трафик НЕ переключаю, активен прежний $active — простоя нет"
-    cont "Полный журнал: journalctl -u adsu-team@$standby -n 200 --no-pager"
+    cont "Полный журнал: journalctl -u $SERVICE_UNIT@$standby -n 200 --no-pager"
     diagnose_color "$standby"
     restore_standby "$standby" "$prev_jar"
     exit 1
@@ -129,19 +128,30 @@ printf '%s\n' "$RELEASE_ID" > "$DEPLOY_DIR/$standby/RELEASE" \
     || warn "не удалось записать $DEPLOY_DIR/$standby/RELEASE. Метка справочная, деплой продолжается"
 
 # Смоук по РЕАЛЬНОМУ порту приложения: management висит на отдельном сокете и не знает про
-# base-path, поэтому неверный SERVER_PORT и сломанный spring.webflux.base-path он не поймает.
-# 407 — штатный ответ LocalNetworkWebFilter на запрос с 127.0.0.1 (loopback не входит в
-# security.allowed-networks), 200 — если его туда добавили; оба означают «приложение отвечает».
-probe="http://127.0.0.1:$(app_port "$standby")/v1/team/local/probe"
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$probe" || echo 000)"
-case "$code" in
-    200|407) step "проба $probe вернула $code — приложение отвечает" ;;
-    *)
-        die "проба $probe вернула $code, ожидались 200 или 407: трафик НЕ переключаю"
+# base-path, поэтому неверный SERVER_PORT и сломанный base-path он не поймает. Путь и набор
+# допустимых кодов задаёт профиль: у team это /v1/team/local/probe, где 407 — штатный ответ
+# LocalNetworkWebFilter на запрос с 127.0.0.1 (loopback не входит в security.allowed-networks),
+# а 200 — если его туда добавили; оба означают «приложение отвечает».
+# Пустой SMOKE_PATH выключает шаг ЯВНО и с сообщением: молчаливый пропуск в логе читался бы
+# как «смоук прошёл», хотя проверки не было вовсе.
+if [ -n "${SMOKE_PATH:-}" ]; then
+    probe="http://127.0.0.1:$(app_port "$standby")$SMOKE_PATH"
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$probe" || echo 000)"
+    smoke_ok=0
+    # shellcheck disable=SC2086  # SMOKE_EXPECT — намеренно список кодов через пробел
+    for want in ${SMOKE_EXPECT:-200}; do
+        if [ "$code" = "$want" ]; then smoke_ok=1; fi
+    done
+    if [ "$smoke_ok" -eq 1 ]; then
+        step "проба $probe вернула $code — приложение отвечает"
+    else
+        die "проба $probe вернула $code, ожидались ${SMOKE_EXPECT:-200}: трафик НЕ переключаю"
         cont "Активен прежний $active, простоя нет."
         exit 1
-        ;;
-esac
+    fi
+else
+    step "смоук по app-порту не настроен (SMOKE_PATH пуст) — пропускаю"
+fi
 
 step "переключаю Caddy на $standby (порт $(app_port "$standby"))"
 apply_upstream "$standby" "$active" || exit 1

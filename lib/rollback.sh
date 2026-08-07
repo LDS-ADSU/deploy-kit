@@ -17,8 +17,6 @@ set -euo pipefail
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
-
 acquire_switch_lock
 
 active="$(detect_active)"
@@ -37,8 +35,8 @@ if [ "$healthy" -eq 1 ]; then
     step "$target уже здоров — переключаю апстрим без рестарта, откат мгновенный"
 else
     step "$target не отвечает — поднимаю его; откат будет не мгновенным (до ${HEALTH_TIMEOUT}с)"
-    sudo -n systemctl restart "adsu-team@$target" \
-        || { die "не удалось перезапустить adsu-team@$target: откат прерван, активен $active"; exit 1; }
+    sudo -n systemctl restart "$SERVICE_UNIT@$target" \
+        || { die "не удалось перезапустить $SERVICE_UNIT@$target: откат прерван, активен $active"; exit 1; }
     wait_healthy "$target" "$HEALTH_TIMEOUT" \
         || { die "$target не вышел в готовность: откат прерван, активен $active"; exit 1; }
 fi

@@ -13,6 +13,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS="${SCRIPTS:-$(cd "$HERE/../lib" && pwd)}"
+# Профиль сервиса, против которого гоняется стенд. По умолчанию team — эталон, на котором
+# написаны все ассерты ниже; матрица подставляет остальные четыре через PROFILE.
+PROFILE="${PROFILE:-$HERE/profiles/team.conf}"
+export SERVICE_PROFILE="$PROFILE"
 PASS=0; FAIL=0
 
 setup() {                       # setup <активный-цвет>
