@@ -17,7 +17,7 @@ Adopting the kit is how the other four get all of that at once.
 | `gradle-build/` | composite action: wrapper validation, JDK, cache, `./gradlew …` |
 | `lockstep-check/` | composite action: a shared-kernel pin must equal the latest release |
 | `blue-green/` | composite action: roll into standby, gate, switch Caddy, write the summary |
-| `test/` | the harness, its stubs, and one profile per service |
+| `test/` | the harness, its stubs, and one profile per profile *shape* |
 | `service.conf.example` | the profile a service repository copies and fills in |
 
 They are composite actions, not reusable workflows, on purpose. A composite action runs as steps
@@ -73,7 +73,7 @@ Every successful deploy installs the scripts and the resolved profile into `$DEP
 the on-call path never depends on where the runner unpacked an action checkout:
 
 ```bash
-/opt/backend/adsu-team/bin/rollback.sh
+/opt/backend/<service>/bin/rollback.sh
 ```
 
 It needs no environment at all — `lib.sh` finds the `service.conf` sitting next to it. Rollback
@@ -90,14 +90,22 @@ the one matching the release currently serving traffic.
 test/matrix.sh
 ```
 
-Runs the harness against all five profiles: 63 assertions for team, 61 for the others (the
-two-assertion gap is the smoke scenario, which only applies to a profile that defines
-`SMOKE_PATH`). `self-test.yml` runs it on every pull request together with `shellcheck -x` and a
-parse of the action manifests.
+Runs the harness against every profile in `test/profiles/`: 63 assertions where the profile has
+a smoke endpoint, 61 where it does not. `self-test.yml` runs it on every pull request together
+with `shellcheck -x` and a parse of the action manifests.
 
-Run the matrix rather than one profile, and do not trust a green team run on its own. The first
-generalisation left a literal `team.jar` in the line that saves the standby's previous build. On
-the team profile that literal is indistinguishable from `$JAR_NAME`, so it passed; every other
-service failed 25 assertions and would have destroyed its warm reserve on the first deploy. A
-second profile is the cheapest thing that finds that class of bug, and there is no substitute
-for it.
+The fixtures are **synthetic and organised by shape**, not copies of production profiles. The
+harness asserts which fields are present and how they combine, never a particular port number, so
+real topology would add nothing here — and the shapes can cover more than production does. The
+five-digit-port fixture matches no current service precisely because every real profile is
+four-digit: without it, the 2-5 digit width in `detect_active` would be asserted by nothing, and
+the first service to pick a high port would fail with "cannot determine the active colour" on a
+perfectly healthy host.
+
+Run the matrix, never a single profile. The first generalisation left a literal `team.jar` in the
+line that saves the standby's previous build; on the profile it was written for, that literal is
+indistinguishable from `$JAR_NAME`, so it passed, while every other shape failed 25 assertions and
+would have destroyed the warm reserve on the first deploy. The synthetic fixtures caught a second
+one immediately: the harness hardcoded `407` as a successful probe response — one service's
+value — and a profile accepting only `200` failed its own happy path. A second profile is the
+cheapest thing that finds this class of bug, and nothing substitutes for it.

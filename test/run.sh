@@ -26,6 +26,9 @@ export SERVICE_PROFILE="$PROFILE"
 : "${MGMT_PORT_GREEN:=$APP_PORT_GREEN}"
 export SERVICE_UNIT JAR_NAME APP_PORT_BLUE APP_PORT_GREEN MGMT_PORT_BLUE MGMT_PORT_GREEN
 export SMOKE_PATH="${SMOKE_PATH:-}" SMOKE_EXPECT="${SMOKE_EXPECT:-}"
+# Код, который профиль считает УСПЕШНЫМ ответом пробы, — первый из SMOKE_EXPECT. Раньше стенд
+# зашивал 407 (значение team) и на профиле, принимающем только 200, заваливал штатный деплой.
+GOOD_PROBE="${SMOKE_EXPECT%% *}"; : "${GOOD_PROBE:=407}"
 printf 'профиль %s: %s, порты %s/%s, смоук %s\n\n' "$(basename "$PROFILE")" "$SERVICE_UNIT" \
     "$APP_PORT_BLUE" "$APP_PORT_GREEN" "${SMOKE_PATH:-нет}"
 PASS=0; FAIL=0
@@ -59,7 +62,7 @@ deploy()        { bash "$SCRIPTS/deploy.sh" "$DEPLOY_DIR/new.jar" "${1:-abc12345
 
 echo "1. штатный деплой blue → green"
 setup blue
-export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 out="$(deploy)"; rc=$?
 check "код возврата 0"                 "0"    "$rc"
 check "апстрим Caddy → green"          "$APP_PORT_GREEN" "$(upstream_port)"
@@ -76,7 +79,7 @@ check "профиль установлен в bin"       "есть" "$([ -f "$DE
 
 echo "2. новая сборка не поднимается → трафик не трогаем, резерв восстановлен"
 setup blue
-export STUB_READY="blue" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export STUB_READY="blue" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 out="$(deploy)"; rc=$?
 check "код возврата 1"                 "1"    "$rc"
 check "апстрим остался на blue"        "$APP_PORT_BLUE" "$(upstream_port)"
@@ -89,7 +92,7 @@ check "bin НЕ обновлён после провала"  "нет"  "$([ -e "
 echo "3. active врёт (говорит blue, Caddy шлёт в green)"
 setup green
 printf 'blue\n' > "$DEPLOY_DIR/active"
-export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_BLUE
+export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_BLUE
 out="$(deploy)"; rc=$?
 check "код возврата 0"                 "0"    "$rc"
 check "предупреждение о расхождении"   "да"   "$(printf '%s' "$out" | grep -q 'ВНИМАНИЕ.*говорит' && echo да || echo нет)"
@@ -113,13 +116,13 @@ export STUB_READY="blue green"
 out="$(deploy)"; rc=$?
 check "отказ"                          "1"    "$rc"
 check "green не тронут"                "old-jar-green" "$(cat "$DEPLOY_DIR/green/$JAR_NAME")"
-export ALLOW_SAME_RELEASE=1 STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export ALLOW_SAME_RELEASE=1 STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 out="$(deploy)"; rc=$?
 check "ALLOW_SAME_RELEASE=1 пропускает" "0"   "$rc"
 
 echo "6. /actuator/info отдаёт чужой коммит"
 setup blue
-export STUB_READY="blue green" STUB_INFO_COMMIT=999999999999 STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export STUB_READY="blue green" STUB_INFO_COMMIT=999999999999 STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 out="$(deploy)"; rc=$?
 check "трафик не переключён"           "1"    "$rc"
 check "апстрим остался на blue"        "$APP_PORT_BLUE" "$(upstream_port)"
@@ -137,7 +140,7 @@ fi
 
 echo "8. sites/api.caddy не импортирует апстрим"
 setup blue
-export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_BLUE
+export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_BLUE
 out="$(deploy)"; rc=$?
 check "отказ"                          "1"    "$rc"
 check "апстрим возвращён на blue"      "$APP_PORT_BLUE" "$(upstream_port)"
@@ -162,7 +165,7 @@ check "апстрим остался на green"       "$APP_PORT_GREEN" "$(upst
 echo "11. release.sh"
 setup blue
 cp "$DEPLOY_DIR/new.jar" "$DEPLOY_DIR/releases/old111111111.jar"
-export STUB_READY="blue green" STUB_INFO_COMMIT=old111111111ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export STUB_READY="blue green" STUB_INFO_COMMIT=old111111111ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 out="$(bash "$SCRIPTS/release.sh" --list 2>&1)"
 check "--list показывает архив"        "да" "$(printf '%s' "$out" | grep -q old111111111 && echo да || echo нет)"
 out="$(bash "$SCRIPTS/release.sh" nosuch 2>&1)"; rc=$?
@@ -191,28 +194,28 @@ check "апстрим остался на blue"        "$APP_PORT_BLUE" "$(upstr
 echo "14. апстрим с комментарием выше директивы to"
 setup blue
 printf '# был 127.0.0.1:%s до инцидента\nto 127.0.0.1:%s\n' "$APP_PORT_GREEN" "$APP_PORT_BLUE" > "$CADDY_UPSTREAM"
-export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 out="$(deploy)"; rc=$?
 check "цвет определён верно (blue)"    "0"    "$rc"
 check "катили в green"                 "new-jar" "$(cat "$DEPLOY_DIR/green/$JAR_NAME")"
 
 echo "15. RELEASE записан до переключения трафика"
 setup blue
-export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_BLUE
+export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_BLUE
 out="$(deploy)"; rc=$?
 check "отказ на проверке конфига"      "1"    "$rc"
 check "RELEASE green уже записан"      "abc123456789" "$(cat "$DEPLOY_DIR/green/RELEASE")"
 
 echo "16. readiness со status ПЕРВЫМ ключом (регрессия fde2b3a)"
 setup blue
-export STUB_READY="blue green" STUB_STATUS_FIRST=1 STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export STUB_READY="blue green" STUB_STATUS_FIRST=1 STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 out="$(deploy)"; rc=$?
 check "деплой прошёл"                  "0"    "$rc"
 check "апстрим → green"                "$APP_PORT_GREEN" "$(upstream_port)"
 
 echo "17. откат из установленного bin, без единой переменной окружения"
 setup blue
-export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=407 STUB_ADMIN_PORT=$APP_PORT_GREEN
+export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 deploy >/dev/null 2>&1
 # Дежурный в три часа ночи знает только путь /opt/<сервис>/bin/rollback.sh. Ни SERVICE_PROFILE,
 # ни расположение чекаута action'а ему не известны — профиль скрипт обязан найти рядом с собой.
