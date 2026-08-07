@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Стаб caddy: STUB_CADDY_RELOAD_FAIL=1 заставляет reload падать.
+echo "caddy $*" >> "$STUB_LOG"
+[ "${STUB_CADDY_RELOAD_FAIL:-0}" = "1" ] && exit 1
+exit 0

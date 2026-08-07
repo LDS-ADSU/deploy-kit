@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Стаб curl. Эмулирует то, что важно скриптам: -f (exit 22 на >=400), -o, -w с %{http_code},
+# exit 7 при отсутствии соединения.
+#
+# Тела ответов — РЕАЛЬНЫЕ, снятые с прод-хоста. Это принципиально: пока стаб отдавал
+# идеализированное {"status":"UP"}, он скрывал баг, из-за которого деплой fde2b3a простоял
+# 600с и откатился (группа readiness отвечает components ПЕРВЫМ ключом, а проверка была
+# заякорена на начало тела).
+#
+# Управление: STUB_READY (список здоровых цветов), STUB_STATUS_FIRST, STUB_INFO_COMMIT,
+# STUB_PROBE_CODE, STUB_ADMIN (0 = admin API недоступен), STUB_ADMIN_PORT.
+url=""; fmt=""; out=""; fail=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -w) fmt="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -m|--max-time) shift 2 ;;
+    -fsS|-f) fail=1; shift ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+
+port="$(printf '%s' "$url" | sed -n 's#.*127\.0\.0\.1:\([0-9]*\)/.*#\1#p')"
+color=blue; case "$port" in 2344|2343) color=green ;; esac
+healthy=0; case " ${STUB_READY:-} " in *" $color "*) healthy=1 ;; esac
+
+UP_BODY='{"components":{"r2dbc":{"components":{"connectionFactory":{"status":"UP"},"studlifeConnectionFactory":{"status":"UP"}},"status":"UP"},"readinessState":{"status":"UP"}},"status":"UP"}'
+DOWN_BODY='{"components":{"r2dbc":{"components":{"connectionFactory":{"status":"DOWN"}},"status":"DOWN"},"readinessState":{"status":"UP"}},"status":"DOWN"}'
+
+body=""; code=200; connected=1
+case "$url" in
+  */actuator/health/readiness|*/actuator/health)
+    if [ "$healthy" = 1 ]; then
+      body="$UP_BODY"
+      # Порядок ключей в JSON не гарантирован ничем: проверка обязана работать при любом.
+      [ "${STUB_STATUS_FIRST:-0}" = 1 ] && body='{"status":"UP","components":{"readinessState":{"status":"UP"}}}'
+    else body="$DOWN_BODY"; code=503; fi ;;
+  */actuator/info)
+    body="{\"build\":{\"artifact\":\"team-backend\",\"commit\":\"${STUB_INFO_COMMIT:-none}\",\"version\":\"x\"}}" ;;
+  */local/probe)
+    code="${STUB_PROBE_CODE:-407}" ;;
+  */config/)
+    if [ "${STUB_ADMIN:-1}" = 1 ]; then
+      body="{\"upstreams\":[{\"dial\":\"127.0.0.1:${STUB_ADMIN_PORT:-0}\"}]}"
+    else connected=0; fi ;;
+  *) connected=0 ;;
+esac
+
+if [ "$connected" = 0 ]; then
+  [ -n "$fmt" ] && printf '%b' "${fmt//%\{http_code\}/000}"
+  exit 7
+fi
+
+[ -z "$out" ] && printf '%s' "$body"
+[ -n "$fmt" ] && printf '%b' "${fmt//%\{http_code\}/$code}"
+[ "$fail" = 1 ] && [ "$code" -ge 400 ] && exit 22
+exit 0

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Стаб systemctl: пишет вызовы в $STUB_LOG; NRestarts читает из $STUB_STATE/nrestarts.
+# STUB_RESTART_FAIL=1 заставляет restart падать.
+if [ "$1" = "show" ]; then cat "$STUB_STATE/nrestarts" 2>/dev/null || echo 0; exit 0; fi
+echo "systemctl $*" >> "$STUB_LOG"
+[ "${STUB_RESTART_FAIL:-0}" = "1" ] && [ "$1" = "restart" ] && exit 1
+exit 0

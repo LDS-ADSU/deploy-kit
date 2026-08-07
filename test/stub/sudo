@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Стаб sudo: снимает -n и исполняет остальное (systemctl-стаб ниже по PATH).
+[ "$1" = "-n" ] && shift
+exec "$@"
