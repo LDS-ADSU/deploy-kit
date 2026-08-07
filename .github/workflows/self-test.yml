@@ -79,6 +79,17 @@ jobs:
                       if ctx in expr:
                           print(f"::error file={path}::в манифесте есть {ctx} внутри выражения — такого контекста в action нет: {expr.strip()[:80]}")
                           bad = 1
+              # У action из ПОДКАТАЛОГА GITHUB_ACTION_PATH указывает на каталог самого action,
+              # а не на корень репозитория, поэтому lib/ лежит на уровень выше. Ошибка в этом
+              # пути не видна ничем статически и проявляется как exit 127 на первом же реальном
+              # деплое — так её и нашли. Проверяем, что каждый такой путь существует.
+              import os
+              base = os.path.dirname(path)
+              for ref in re.findall(r"\$GITHUB_ACTION_PATH(/[^\"\s]*)", yaml.dump(m)):
+                  target = os.path.normpath(os.path.join(base, ref.lstrip("/")))
+                  if not os.path.exists(target):
+                      print(f"::error file={path}::$GITHUB_ACTION_PATH{ref} указывает на {target}, которого нет")
+                      bad = 1
               print(f"  ok  {path}: {len(runs.get('steps') or [])} шагов")
           sys.exit(bad)
           PY

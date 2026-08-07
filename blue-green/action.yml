@@ -57,16 +57,22 @@ runs:
         echo "Артефакт: $jar"
         echo "Профиль:  $profile"
 
-    # deploy.sh ships with the action, so $GITHUB_ACTION_PATH finds lib/ without a second
-    # checkout and without any token on the production host. It sources its own lib.sh through
-    # BASH_SOURCE, so the sibling files resolve wherever the runner unpacked them.
+    # deploy.sh ships with the action, so no second checkout and no token are needed on the
+    # production host. Note the `..`: this is a SUBDIRECTORY action, and for those
+    # GITHUB_ACTION_PATH points at the action's own directory
+    # (_actions/LDS-ADSU/deploy-kit/<tag>/blue-green), not at the repository root — so lib/ is one
+    # level up. Getting this wrong fails with exit 127 at the very first deploy, which is exactly
+    # how it was found.
+    # deploy.sh sources its own lib.sh through BASH_SOURCE, so the sibling files resolve wherever
+    # the runner unpacked them.
     - name: Deploy (standby → gates → caddy switch)
+      id: deploy
       shell: bash
       env:
         SERVICE_PROFILE: ${{ steps.resolve.outputs.profile }}
         JAR: ${{ steps.resolve.outputs.jar }}
         RELEASE_ID: ${{ inputs.release-id }}
-      run: bash "$GITHUB_ACTION_PATH/lib/deploy.sh" "$JAR" "${RELEASE_ID:0:12}"
+      run: bash "$GITHUB_ACTION_PATH/../lib/deploy.sh" "$JAR" "${RELEASE_ID:0:12}"
 
     # GitHub's notification about a red run omits the one fact that matters — that production
     # stayed on the previous version. Without it an investigation starts from "the fix did not
@@ -77,11 +83,15 @@ runs:
       env:
         SERVICE_PROFILE: ${{ steps.resolve.outputs.profile }}
         RELEASE_ID: ${{ inputs.release-id }}
-        JOB_STATUS: ${{ job.status }}
+        # Исход берём у САМОГО шага выката, а не из job.status: внутри composite action job.status
+        # не отражает падение предыдущего шага этого же action и остаётся success — сводка тогда
+        # написала бы «успех» ровно там, где обязана кричать, что прод не переключился.
+        # `|| 'failure'` покрывает случай, когда упал ещё resolve и шаг deploy не выполнялся.
+        DEPLOY_OUTCOME: ${{ steps.deploy.outcome || 'failure' }}
       run: |
         {
-          echo "### Деплой \`${RELEASE_ID:0:12}\` — $JOB_STATUS"
-          if [ "$JOB_STATUS" != "success" ]; then
+          echo "### Деплой \`${RELEASE_ID:0:12}\` — $DEPLOY_OUTCOME"
+          if [ "$DEPLOY_OUTCOME" != "success" ]; then
             echo
             echo "**Прод остался на предыдущей версии** — трафик не переключался."
           fi
