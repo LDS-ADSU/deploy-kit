@@ -58,6 +58,9 @@ check() {                       # check <описание> <ожидание> <�
 }
 upstream_port() { sed -n 's#.*:\([0-9]*\)#\1#p' "$CADDY_UPSTREAM"; }
 restarts_of()   { grep -c "systemctl restart $SERVICE_UNIT@$1" "$STUB_LOG" 2>/dev/null | tr -d ' '; }
+# Аргумент — release-id; по умолчанию тот, что ждут ассерты. Ни один сценарий пока его не
+# передаёт, но параметр отражает сигнатуру deploy.sh и нужен сценарию с двумя разными релизами.
+# shellcheck disable=SC2120
 deploy()        { bash "$SCRIPTS/deploy.sh" "$DEPLOY_DIR/new.jar" "${1:-abc123456789}" 2>&1; }
 
 echo "1. штатный деплой blue → green"
