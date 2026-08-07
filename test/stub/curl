@@ -22,7 +22,9 @@ while [ $# -gt 0 ]; do
 done
 
 port="$(printf '%s' "$url" | sed -n 's#.*127\.0\.0\.1:\([0-9]*\)/.*#\1#p')"
-color=blue; case "$port" in 2344|2343) color=green ;; esac
+# Порты приходят из профиля (run.sh их экспортирует) — стаб не должен знать только team.
+color=blue
+case "$port" in "${APP_PORT_GREEN:-2343}"|"${MGMT_PORT_GREEN:-2344}") color=green ;; esac
 healthy=0; case " ${STUB_READY:-} " in *" $color "*) healthy=1 ;; esac
 
 UP_BODY='{"components":{"r2dbc":{"components":{"connectionFactory":{"status":"UP"},"studlifeConnectionFactory":{"status":"UP"}},"status":"UP"},"readinessState":{"status":"UP"}},"status":"UP"}'
@@ -37,14 +39,17 @@ case "$url" in
       [ "${STUB_STATUS_FIRST:-0}" = 1 ] && body='{"status":"UP","components":{"readinessState":{"status":"UP"}}}'
     else body="$DOWN_BODY"; code=503; fi ;;
   */actuator/info)
-    body="{\"build\":{\"artifact\":\"team-backend\",\"commit\":\"${STUB_INFO_COMMIT:-none}\",\"version\":\"x\"}}" ;;
-  */local/probe)
-    code="${STUB_PROBE_CODE:-407}" ;;
+    body="{\"build\":{\"artifact\":\"${SERVICE_UNIT:-team-backend}\",\"commit\":\"${STUB_INFO_COMMIT:-none}\",\"version\":\"x\"}}" ;;
   */config/)
     if [ "${STUB_ADMIN:-1}" = 1 ]; then
       body="{\"upstreams\":[{\"dial\":\"127.0.0.1:${STUB_ADMIN_PORT:-0}\"}]}"
     else connected=0; fi ;;
-  *) connected=0 ;;
+  *)
+    # Смоук-путь задаёт профиль, поэтому матчим по нему, а не по зашитому /local/probe.
+    # У сервисов без пробы SMOKE_PATH пуст — deploy.sh смоук не делает, и сюда не приходит.
+    if [ -n "${SMOKE_PATH:-}" ] && [ "${url%"$SMOKE_PATH"}" != "$url" ]; then
+      code="${STUB_PROBE_CODE:-407}"
+    else connected=0; fi ;;
 esac
 
 if [ "$connected" = 0 ]; then

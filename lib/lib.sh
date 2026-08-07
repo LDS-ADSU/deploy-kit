@@ -10,8 +10,20 @@
 # sourced shell file of `: "${KEY:=value}"` assignments, so the ENVIRONMENT always wins over
 # the profile — deploy.yml keeps passing DEPLOY_DIR and the test harness keeps pointing the
 # whole thing at a temporary directory, and neither has to learn that profiles exist.
+# Рядом с установленной копией скриптов лежит service.conf (см. install_bin в deploy.sh),
+# поэтому /opt/backend/<сервис>/bin/rollback.sh запускается дежурным без единой переменной
+# окружения. Условие через `if`, а не `[ ] && [ ] && VAR=`: последнее под set -e уронило бы
+# скрипт, когда первая проверка ложна.
+if [ -z "${SERVICE_PROFILE:-}" ]; then
+    _kit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -r "$_kit_dir/service.conf" ]; then SERVICE_PROFILE="$_kit_dir/service.conf"; fi
+    unset _kit_dir
+fi
 : "${SERVICE_PROFILE:?не задан SERVICE_PROFILE — укажите путь к service.conf сервиса}"
 [ -r "$SERVICE_PROFILE" ] || { echo "!! профиль $SERVICE_PROFILE не читается" >&2; exit 1; }
+# Приводим к абсолютному: install_bin копирует профиль на хост, а deploy.sh мог быть запущен
+# из любого каталога — относительный путь после смены cwd указывал бы в никуда.
+SERVICE_PROFILE="$(cd "$(dirname "$SERVICE_PROFILE")" && pwd)/$(basename "$SERVICE_PROFILE")"
 # shellcheck source=/dev/null
 . "$SERVICE_PROFILE"
 

@@ -46,6 +46,27 @@ restore_standby() {
     fi
 }
 
+# Дежурный запускает откат руками, и путь до скриптов не должен зависеть от того, куда раннер
+# разложил чекаут action'а (_work/_actions/<owner>/<repo>/<tag>/lib). Копия в $DEPLOY_DIR/bin —
+# стабильный путь: /opt/backend/<сервис>/bin/rollback.sh.
+# Всё best-effort: трафик к моменту вызова уже переключён, и неудачное копирование не имеет
+# права покрасить успешный деплой.
+install_bin() {
+    local src bin f
+    src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    bin="$DEPLOY_DIR/bin"
+    mkdir -p "$bin" 2>/dev/null || { warn "не удалось создать $bin — откат придётся запускать из чекаута"; return 0; }
+    # Профиль кладём именно как service.conf: lib.sh находит соседний файл с этим именем сам,
+    # поэтому установленным скриптам не нужен SERVICE_PROFILE в окружении.
+    install -m 0644 "$SERVICE_PROFILE" "$bin/service.conf" 2>/dev/null \
+        || { warn "не удалось положить профиль в $bin — откат оттуда не заработает"; return 0; }
+    install -m 0644 "$src/lib.sh" "$bin/lib.sh" 2>/dev/null || warn "не удалось положить lib.sh в $bin"
+    for f in deploy.sh rollback.sh release.sh; do
+        install -m 0755 "$src/$f" "$bin/$f" 2>/dev/null || warn "не удалось положить $f в $bin"
+    done
+    step "скрипты обновлены в $bin (откат: $bin/rollback.sh)"
+}
+
 acquire_switch_lock
 
 active="$(detect_active)"
@@ -76,7 +97,7 @@ fi
 # Страховка на случай неудачного старта новой сборки (см. restore_standby)
 prev_jar="$DEPLOY_DIR/$standby/$JAR_NAME.prev"
 if [ -f "$DEPLOY_DIR/$standby/$JAR_NAME" ]; then
-    install -m 0644 "$DEPLOY_DIR/$standby/team.jar" "$prev_jar"
+    install -m 0644 "$DEPLOY_DIR/$standby/$JAR_NAME" "$prev_jar"
 fi
 
 # Атомарная подмена jar standby-цвета
@@ -158,7 +179,7 @@ apply_upstream "$standby" "$active" || exit 1
 
 # `caddy reload` возвращает 0 по факту принятия конфига и ничего не говорит о том, что
 # sites/api.caddy действительно импортирует active-upstream.caddy (импортов там два — общий
-# /v1/team* и отдельный SSE-роут, см. README).
+# у team это общий /v1/team* и отдельный SSE-роут, см. README сервиса).
 if caddy_config="$(curl -fsS --max-time 5 "$CADDY_ADMIN/config/" 2>/dev/null)"; then
     if ! printf '%s' "$caddy_config" | grep -q "127.0.0.1:$(app_port "$standby")"; then
         die "живой конфиг Caddy не содержит порт $standby — возвращаю апстрим на $active"
@@ -180,6 +201,13 @@ else
 fi
 
 record_active "$standby"
+
+# Скрипты обновляем ТОЛЬКО после успешного переключения. Сборка, не прошедшая гейты, свои
+# скрипты ничем не подтвердила, а дежурному нужен откат, который заведомо работает — поэтому
+# в $DEPLOY_DIR/bin всегда лежит версия последнего УДАЧНОГО деплоя, ровно та, которой поднят
+# текущий релиз.
+install_bin
+
 rm -f "$prev_jar"
 step "готово: активен $standby ($RELEASE_ID), тёплый резерв — $active ($(release_of "$active"))"
 
