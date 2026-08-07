@@ -16,9 +16,10 @@ inputs:
     required: true
   token:
     description: >-
-      Token with read:packages for that package. Pass
-      "${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}" — the default token works only
-      where the package grants Actions access to the calling repository.
+      Token with read:packages for that package. Pass the calling workflow's PACKAGES_READ_TOKEN
+      secret with its GITHUB_TOKEN as the fallback; the default token only works where the package
+      grants Actions access to the calling repository.
+      (Written without expression syntax on purpose — see the same note in gradle-build.)
     required: true
   build-file:
     description: File the pin is read from.

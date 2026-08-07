@@ -68,6 +68,17 @@ jobs:
                   if "run" in step and not step.get("shell"):
                       print(f"::error file={path}::шаг {i} ({step.get('name','без имени')}) с run: без shell:")
                       bad = 1
+              # Выражения в манифесте вычисляются ВЕЗДЕ, включая description входа, а контекстов
+              # secrets/vars внутри action не существует. Такой манифест не падает при разборе
+              # YAML — он падает при загрузке action у каждого вызывающего, то есть ломает чужие
+              # пайплайны, а не свой. Ровно так и произошло: описание входа советовало передавать
+              # передавать секрет выражением, и первый же потребитель кита не смог стартовать.
+              import re
+              for expr in re.findall(r"\$\{\{(.*?)\}\}", yaml.dump(m, allow_unicode=True), re.S):
+                  for ctx in ("secrets.", "vars."):
+                      if ctx in expr:
+                          print(f"::error file={path}::в манифесте есть {ctx} внутри выражения — такого контекста в action нет: {expr.strip()[:80]}")
+                          bad = 1
               print(f"  ok  {path}: {len(runs.get('steps') or [])} шагов")
           sys.exit(bad)
           PY
