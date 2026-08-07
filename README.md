@@ -17,6 +17,7 @@ Adopting the kit is how the other four get all of that at once.
 | `gradle-build/` | composite action: wrapper validation, JDK, cache, `./gradlew …` |
 | `lockstep-check/` | composite action: a shared-kernel pin must equal the latest release |
 | `blue-green/` | composite action: roll into standby, gate, switch Caddy, write the summary |
+| `rollback/` | composite action: switch traffic back to the warm reserve, from the Actions tab |
 | `test/` | the harness, its stubs, and one profile per profile *shape* |
 | `service.conf.example` | the profile a service repository copies and fills in |
 
@@ -79,6 +80,31 @@ the on-call path never depends on where the runner unpacked an action checkout:
 It needs no environment at all — `lib.sh` finds the `service.conf` sitting next to it. Rollback
 goes exactly one colour back; once two deploys have landed, both colours carry new code and you
 want `bin/release.sh --list` followed by `bin/release.sh <release-id>`.
+
+That path requires being on the host. For the same thing from the Actions tab — which is what an
+on-call engineer reaching for a phone actually has — add a `workflow_dispatch` workflow calling the
+`rollback` action:
+
+```yaml
+concurrency:
+  group: deploy-<service>          # THE SAME group as the deploy workflow
+  cancel-in-progress: false
+jobs:
+  rollback:
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: LDS-ADSU/deploy-kit/rollback@v1.0.5
+        with:
+          profile: deploy/service.conf
+          confirm: ${{ inputs.confirm }}
+```
+
+Two details are load-bearing. The concurrency group must be **the deploy's group**, so a rollback
+cannot run while a deploy is switching traffic — the file lock only covers processes on the host
+and knows nothing about a second Actions job. And `confirm` must be typed as the literal word
+`rollback`: this is a button that changes the version serving production, and a stray click should
+not be enough.
 
 Installation happens **only after a successful switch**. A build that failed its gates has not
 vouched for its scripts either, so `bin/` always holds the last known-good copy, which is also

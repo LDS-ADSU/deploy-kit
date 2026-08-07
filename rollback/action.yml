@@ -1,0 +1,102 @@
+name: Blue-green rollback
+description: >-
+  Switch production traffic back to the other colour — the warm reserve still running the previous
+  release. In the normal case this is a single `caddy reload`: no restart, no downtime. The reserve
+  is restarted only if it does not answer.
+
+  Rollback goes exactly ONE step back. Once two deploys have landed, both colours carry new code
+  and this is useless — then the tool is release.sh with an explicit release id, which is available
+  on the host at $DEPLOY_DIR/bin/release.sh.
+
+inputs:
+  profile:
+    description: >-
+      Path to the service profile (service.conf), absolute or relative to the workspace. The same
+      file the deploy uses; it carries DEPLOY_DIR, the unit name and both colour ports.
+    required: true
+  confirm:
+    description: >-
+      Must be the literal word "rollback". This action switches production traffic from a button in
+      the Actions tab, where a stray click costs an unplanned version change on a live service, so
+      the intent is spelled out rather than implied by pressing "Run workflow".
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The guard is here rather than in each caller so that all five services get the same one and
+    # it cannot drift.
+    - name: Verify the confirmation
+      shell: bash
+      env:
+        CONFIRM: ${{ inputs.confirm }}
+      run: |
+        if [ "$CONFIRM" != "rollback" ]; then
+          echo "!! подтверждение не совпало: нужно ввести ровно 'rollback', получено '${CONFIRM}'"
+          echo "   Откат переключает боевой трафик — это осознанное действие, а не нажатие кнопки."
+          exit 1
+        fi
+
+    - name: Resolve the profile
+      id: resolve
+      shell: bash
+      env:
+        PROFILE_IN: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        case "$PROFILE_IN" in
+          /*) profile="$PROFILE_IN" ;;
+          *)  profile="$GITHUB_WORKSPACE/$PROFILE_IN" ;;
+        esac
+        [ -r "$profile" ] || { echo "!! профиль $profile не читается"; exit 1; }
+        echo "profile=$profile" >> "$GITHUB_OUTPUT"
+        echo "Профиль: $profile"
+
+    # Note the `..`: this is a SUBDIRECTORY action, so GITHUB_ACTION_PATH points at the action's
+    # own directory and lib/ is one level up.
+    #
+    # This runs the kit's copy, pinned by the tag in the calling workflow — the same code path the
+    # deploy uses. The copy installed at $DEPLOY_DIR/bin stays the ssh-only path for an engineer
+    # already on the host; both are the same script.
+    - name: Switch traffic to the standby colour
+      id: rollback
+      shell: bash
+      env:
+        SERVICE_PROFILE: ${{ steps.resolve.outputs.profile }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/rollback.sh"
+
+    # A rollback is run under pressure, so the summary must answer the only question that matters
+    # afterwards — which colour is serving now, and on which release — without reading the log.
+    - name: Report the rollback outcome
+      if: always()
+      shell: bash
+      env:
+        SERVICE_PROFILE: ${{ steps.resolve.outputs.profile }}
+        # Inside a composite action job.status does not reflect a failure of an earlier step of the
+        # same action, so the step's own outcome is used. `|| 'failure'` covers the case where
+        # resolve failed and this step never ran.
+        ROLLBACK_OUTCOME: ${{ steps.rollback.outcome || 'failure' }}
+      run: |
+        {
+          echo "### Откат — $ROLLBACK_OUTCOME"
+          if [ "$ROLLBACK_OUTCOME" != "success" ]; then
+            echo
+            echo "**Трафик не переключён** — активен прежний цвет."
+          fi
+          if [ -n "${SERVICE_PROFILE:-}" ] && [ -r "${SERVICE_PROFILE:-}" ]; then
+            # shellcheck source=/dev/null
+            . "$SERVICE_PROFILE"
+            echo
+            echo "| цвет | релиз |"
+            echo "|---|---|"
+            for c in blue green; do
+              echo "| \`$c\` | \`$(cat "$DEPLOY_DIR/$c/RELEASE" 2>/dev/null || echo '?')\` |"
+            done
+            echo
+            echo "Активный апстрим: \`$(grep -E '^[[:space:]]*to' \
+              "${CADDY_UPSTREAM:-$DEPLOY_DIR/caddy/active-upstream.caddy}" 2>/dev/null || echo '?')\`"
+            echo
+            echo "Откат ходит на ОДИН шаг. Если оба цвета уже несут новый код, нужен явный релиз:"
+            echo "\`$DEPLOY_DIR/bin/release.sh --list\`, затем \`$DEPLOY_DIR/bin/release.sh <release-id>\`."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY" || true   # сводка не имеет права покрасить выполненный откат
