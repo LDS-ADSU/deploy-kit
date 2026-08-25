@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
-# Blue-green деплой на сам сервер (без Docker), за Caddy. Оба цвета (blue/green) работают
-# постоянно как тёплый резерв; Caddy в каждый момент проксирует на ОДИН активный цвет.
+# Blue-green deploy onto the host itself, no Docker, behind Caddy. Both colours run continuously as a
+# warm reserve; Caddy proxies to exactly ONE of them at a time.
 #
-# Шаги: собранный jar → в каталог STANDBY-цвета → restart этого юнита → readiness-check (его
-# management-порт) → сверка релиза на /actuator/info → смоук по app-порту → переключение Caddy
-# на standby (`caddy reload`, graceful) → standby становится активным, прежний активный
-# продолжает крутиться на старой версии (тёплый резерв / мгновенный откат).
-# Если standby не поднялся — Caddy НЕ переключается, активный цвет обслуживает трафик без
-# изменений, а standby возвращается на предыдущий jar, чтобы резерв не пропал.
+# The steps: put the built jar in the STANDBY colour's directory, restart that unit, wait for
+# readiness on its management port, confirm the release on /actuator/info, smoke-test the app port,
+# then switch Caddy to standby with a graceful `caddy reload`. Standby becomes active and the previous
+# active keeps running the old version as a warm reserve and an instant rollback.
 #
-# Использование: deploy/deploy.sh <путь-к-jar> <release-id>
-# Переменные: HEALTH_TIMEOUT (сек, 600), RESTORE_TIMEOUT (180), KEEP_RELEASES (5),
+# If standby does not come up, Caddy is NOT switched: the active colour serves traffic unchanged, and
+# standby is put back on its previous jar so the reserve does not disappear.
+#
+# Usage: deploy/deploy.sh <path-to-jar> <release-id>
+# Variables: HEALTH_TIMEOUT (seconds, 600), RESTORE_TIMEOUT (180), KEEP_RELEASES (5),
 #             ALLOW_SAME_RELEASE, SKIP_RELEASE_CHECK
 set -euo pipefail
 
@@ -25,8 +26,9 @@ RELEASES_DIR="$DEPLOY_DIR/releases"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-180}"
 
-# Битая сборка + Restart=on-failure = вечный цикл перезапусков, и тёплого резерва больше нет:
-# rollback.sh будет некуда переключаться. Возвращаем предыдущий jar и поднимаем цвет на нём.
+# A broken build plus Restart=on-failure is an endless restart loop, and the warm reserve is gone with
+# it: rollback.sh would have nowhere to switch to. The previous jar goes back and the colour comes up
+# on it.
 restore_standby() {
     local color="$1" prev="$2"
     if [ -f "$prev" ]; then
@@ -46,18 +48,18 @@ restore_standby() {
     fi
 }
 
-# Дежурный запускает откат руками, и путь до скриптов не должен зависеть от того, куда раннер
-# разложил чекаут action'а (_work/_actions/<owner>/<repo>/<tag>/lib). Копия в $DEPLOY_DIR/bin —
-# стабильный путь: /opt/backend/<сервис>/bin/rollback.sh.
-# Всё best-effort: трафик к моменту вызова уже переключён, и неудачное копирование не имеет
-# права покрасить успешный деплой.
+# On-call runs a rollback by hand, and the path to the scripts must not depend on where the runner
+# unpacked the action's checkout. The copy in $DEPLOY_DIR/bin is the stable one:
+# /opt/backend/<service>/bin/rollback.sh.
+# Best-effort: traffic has already been switched by this point, so a failed copy has no right to fail
+# a successful deploy.
 install_bin() {
     local src bin f
     src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     bin="$DEPLOY_DIR/bin"
     mkdir -p "$bin" 2>/dev/null || { warn "не удалось создать $bin — откат придётся запускать из чекаута"; return 0; }
-    # Профиль кладём именно как service.conf: lib.sh находит соседний файл с этим именем сам,
-    # поэтому установленным скриптам не нужен SERVICE_PROFILE в окружении.
+    # The profile is installed under exactly the name service.conf: lib.sh finds a neighbouring file by
+    # that name on its own, so the installed scripts need no SERVICE_PROFILE in their environment.
     install -m 0644 "$SERVICE_PROFILE" "$bin/service.conf" 2>/dev/null \
         || { warn "не удалось положить профиль в $bin — откат оттуда не заработает"; return 0; }
     install -m 0644 "$src/lib.sh" "$bin/lib.sh" 2>/dev/null || warn "не удалось положить lib.sh в $bin"
@@ -73,8 +75,9 @@ active="$(detect_active)"
 standby="$(other "$active")"
 step "активен $active ($(release_of "$active")) → раскатываю $RELEASE_ID в резервный $standby"
 
-# Раскатка релиза, который уже обслуживает трафик, затирает единственную цель отката — тёплый
-# резерв со старой версией. Обычно это повторный Re-run уже выехавшего деплоя.
+# Rolling out a release that already serves traffic destroys the only thing a rollback aims at: the
+# warm reserve running the previous version. Usually this is a re-run of a deploy that already
+# shipped.
 if [ "$(release_of "$active")" = "$RELEASE_ID" ] && [ -z "${ALLOW_SAME_RELEASE:-}" ]; then
     die "$RELEASE_ID уже обслуживает трафик на $active: раскатка в $standby уничтожит"
     cont "единственную цель отката — резерв с предыдущей версией."
@@ -84,28 +87,29 @@ fi
 
 mkdir -p "$RELEASES_DIR" "$DEPLOY_DIR/$standby"
 
-# Архив сборки (release.sh катит из него же — тогда копировать файл в самого себя не нужно)
+# The build archive. release.sh deploys straight out of it, so the file is not copied onto itself.
 archived="$RELEASES_DIR/$RELEASE_ID.jar"
 if [ "$(readlink -f "$JAR_SRC")" != "$(readlink -f "$archived")" ]; then
     install -m 0644 "$JAR_SRC" "$archived"
 else
-    # Освежаем метку: чистка ниже отбирает свежие по mtime, иначе только что выкаченная из
-    # архива сборка первой же попала бы под удаление — и вернуться на неё стало бы нельзя.
+    # The mtime is refreshed: the sweep below keeps the newest by mtime, so a build just deployed out of
+    # the archive would otherwise be the first one deleted — and there would be no going back to it.
     touch "$archived"
 fi
 
-# Страховка на случай неудачного старта новой сборки (см. restore_standby)
+# The fallback if the new build fails to start; see restore_standby.
 prev_jar="$DEPLOY_DIR/$standby/$JAR_NAME.prev"
 if [ -f "$DEPLOY_DIR/$standby/$JAR_NAME" ]; then
     install -m 0644 "$DEPLOY_DIR/$standby/$JAR_NAME" "$prev_jar"
 fi
 
-# Атомарная подмена jar standby-цвета
+# The standby colour's jar is swapped atomically.
 install -m 0644 "$JAR_SRC" "$DEPLOY_DIR/$standby/$JAR_NAME.new"
 mv -f "$DEPLOY_DIR/$standby/$JAR_NAME.new" "$DEPLOY_DIR/$standby/$JAR_NAME"
 
-# Проверяем код рестарта явно: к этому моменту jar уже подменён, и голая команда под set -e
-# оборвала бы скрипт ДО restore_standby, оставив резерв с неподнятой новой сборкой.
+# The restart's exit code is checked explicitly: the jar has already been swapped, and a bare command
+# under set -e would end the script BEFORE restore_standby, leaving the reserve holding a build that
+# does not start.
 step "перезапускаю $SERVICE_UNIT@$standby на новой сборке; трафик пока на $active"
 if ! sudo -n systemctl restart "$SERVICE_UNIT@$standby"; then
     die "не удалось перезапустить $SERVICE_UNIT@$standby"
@@ -116,9 +120,9 @@ fi
 
 step "жду готовности $standby (не дольше ${HEALTH_TIMEOUT}с)"
 if ! wait_healthy "$standby" "$HEALTH_TIMEOUT"; then
-    # Про сам факт «не вышел в готовность» уже сказал wait_healthy — здесь только следствие.
-    # Подсказку даём ДО диагностики: диагностика длинная, и человек должен сначала увидеть,
-    # что прод цел, а уже потом разбираться.
+    # wait_healthy has already reported that readiness was not reached; this is only the consequence.
+    # The reassurance comes BEFORE the diagnostics, which are long: the reader should see that production
+    # is intact first and investigate afterwards.
     die "трафик НЕ переключаю, активен прежний $active — простоя нет"
     cont "Полный журнал: journalctl -u $SERVICE_UNIT@$standby -n 200 --no-pager"
     diagnose_color "$standby"
@@ -126,13 +130,13 @@ if ! wait_healthy "$standby" "$HEALTH_TIMEOUT"; then
     exit 1
 fi
 
-# Проверяем, что отвечает ИМЕННО новая сборка: рестарт мог поднять старый jar (запись не
-# прошла, юнит смотрит в другой каталог), а readiness этого не различает.
+# Confirms that the build answering is the NEW one: a restart may have brought up the old jar — the
+# write failed, or the unit points at another directory — and readiness cannot tell the difference.
 if [ -z "${SKIP_RELEASE_CHECK:-}" ]; then
     info="http://127.0.0.1:$(mgmt_port "$standby")/actuator/info"
-    # RELEASE_ID — намеренно ПРЕФИКС полного SHA (deploy.yml запекает 40 символов, сюда
-    # передаёт 12), поэтому сравнение префиксное, а не точное. Якорим на поле commit, чтобы
-    # совпадение не поймалось где-нибудь в build.time.
+    # RELEASE_ID is deliberately a PREFIX of the full SHA — deploy.yml bakes in 40 characters and passes
+    # 12 here — so the comparison is by prefix, not equality. It is anchored to the commit field so a
+    # match cannot come from somewhere in build.time.
     if ! curl -fsS --max-time 5 "$info" 2>/dev/null | grep -Fq "\"commit\":\"$RELEASE_ID"; then
         die "в $standby отвечает не та сборка: на $info нет commit=$RELEASE_ID."
         cont "Трафик НЕ переключаю, активен прежний $active."
@@ -141,25 +145,25 @@ if [ -z "${SKIP_RELEASE_CHECK:-}" ]; then
     fi
 fi
 
-# RELEASE пишем ЗДЕСЬ, а не после переключения: в этой точке уже доказано, какая сборка
-# отвечает на порту цвета, а на сам caddy reload содержимое файла не влияет. Если писать
-# позже, то упавший между reload и записью деплой оставил бы rollback.sh с меткой, по
-# которой он «откатывается» на более новую сборку.
+# RELEASE is written HERE rather than after the switch: at this point it is proven which build answers
+# on the colour's port, and the file's contents do not affect `caddy reload` at all. Written later, a
+# deploy that dies between the reload and the write would leave rollback.sh with a marker that rolls
+# "back" onto a newer build.
 printf '%s\n' "$RELEASE_ID" > "$DEPLOY_DIR/$standby/RELEASE" \
     || warn "не удалось записать $DEPLOY_DIR/$standby/RELEASE. Метка справочная, деплой продолжается"
 
-# Смоук по РЕАЛЬНОМУ порту приложения: management висит на отдельном сокете и не знает про
-# base-path, поэтому неверный SERVER_PORT и сломанный base-path он не поймает. Путь и набор
-# допустимых кодов задаёт профиль. Коды перечисляются через пробел, потому что «приложение
-# отвечает» — далеко не всегда 200: сервис за фильтром локальной сети штатно отвечает на loopback
-# 403/407, и такой ответ доказывает работоспособность ровно так же.
-# Пустой SMOKE_PATH выключает шаг ЯВНО и с сообщением: молчаливый пропуск в логе читался бы
-# как «смоук прошёл», хотя проверки не было вовсе.
+# The smoke test hits the REAL application port: management listens on its own socket and knows
+# nothing about the base path, so it would catch neither a wrong SERVER_PORT nor a broken base path.
+# The path and the acceptable codes come from the profile. The codes are a space-separated list
+# because "the application answers" is often not 200: a service behind a local-network filter answers
+# 403 or 407 on loopback as designed, and that proves it works just as well.
+# An empty SMOKE_PATH disables the step EXPLICITLY and says so: a silent skip reads in the log as a
+# smoke test that passed, when none ran.
 if [ -n "${SMOKE_PATH:-}" ]; then
     probe="http://127.0.0.1:$(app_port "$standby")$SMOKE_PATH"
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$probe" || echo 000)"
     smoke_ok=0
-    # shellcheck disable=SC2086  # SMOKE_EXPECT — намеренно список кодов через пробел
+    # shellcheck disable=SC2086  # SMOKE_EXPECT is deliberately a space-separated list of codes
     for want in ${SMOKE_EXPECT:-200}; do
         if [ "$code" = "$want" ]; then smoke_ok=1; fi
     done
@@ -177,9 +181,9 @@ fi
 step "переключаю Caddy на $standby (порт $(app_port "$standby"))"
 apply_upstream "$standby" "$active" || exit 1
 
-# `caddy reload` возвращает 0 по факту принятия конфига и ничего не говорит о том, что
-# sites/api.caddy действительно импортирует active-upstream.caddy (импортов там два — общий
-# у сервиса их может быть несколько — общий префикс и отдельные роуты, см. его README).
+# `caddy reload` returns 0 once the config is accepted and says nothing about whether sites/api.caddy
+# actually imports active-upstream.caddy — a service may have several imports, a shared prefix and
+# separate routes; see its README.
 if caddy_config="$(curl -fsS --max-time 5 "$CADDY_ADMIN/config/" 2>/dev/null)"; then
     if ! printf '%s' "$caddy_config" | grep -q "127.0.0.1:$(app_port "$standby")"; then
         die "живой конфиг Caddy не содержит порт $standby — возвращаю апстрим на $active"
@@ -188,10 +192,11 @@ if caddy_config="$(curl -fsS --max-time 5 "$CADDY_ADMIN/config/" 2>/dev/null)"; 
         reload_caddy || true
         exit 1
     fi
-    # Порт прежнего цвета в живом конфиге = где-то остался литерал вместо import. Трафик
-    # уже частично уехал, откатывать поздно и незачем — но знать об этом надо, поэтому
-    # предупреждение, а не отказ (иначе недомигрированный sites/api.caddy заблокировал бы
-    # любой деплой, а какой именно он на хосте — из репозитория не видно).
+    # The previous colour's port in the live config means a literal was left somewhere instead of an
+    # import. Traffic has already partly moved, so rolling back is both too late and pointless — but
+    # someone has to know, hence a warning rather than a refusal. A refusal would let a half-migrated
+    # sites/api.caddy block every deploy, and what that file looks like on the host is not visible from
+    # the repository.
     if printf '%s' "$caddy_config" | grep -q "127.0.0.1:$(app_port "$active")"; then
         warn "в живом конфиге Caddy остался и порт прежнего цвета $active."
         cont "Вероятно, часть маршрутов задаёт апстрим литералом вместо import $CADDY_UPSTREAM."
@@ -202,17 +207,17 @@ fi
 
 record_active "$standby"
 
-# Скрипты обновляем ТОЛЬКО после успешного переключения. Сборка, не прошедшая гейты, свои
-# скрипты ничем не подтвердила, а дежурному нужен откат, который заведомо работает — поэтому
-# в $DEPLOY_DIR/bin всегда лежит версия последнего УДАЧНОГО деплоя, ровно та, которой поднят
-# текущий релиз.
+# The scripts are updated ONLY after a successful switch. A build that failed its gates has proven
+# nothing about its own scripts, and on-call needs a rollback that is known to work — so
+# $DEPLOY_DIR/bin always holds the version from the last SUCCESSFUL deploy, the one that brought up
+# the current release.
 install_bin
 
 rm -f "$prev_jar"
 step "готово: активен $standby ($RELEASE_ID), тёплый резерв — $active ($(release_of "$active"))"
 
-# Чистка архива сборок (оставляем KEEP_RELEASES свежих) — best-effort: это последняя команда
-# скрипта, и её код возврата иначе стал бы кодом уже переключённого деплоя.
+# Sweeping the build archive down to KEEP_RELEASES is best-effort: this is the script's last command,
+# and its exit code would otherwise become the exit code of an already-switched deploy.
 if ! { ls -1t "$RELEASES_DIR"/*.jar 2>/dev/null | tail -n +"$((KEEP_RELEASES + 1))" | xargs -r rm -f; }; then
     warn "не удалось почистить архив $RELEASES_DIR. Деплой при этом успешен"
 fi

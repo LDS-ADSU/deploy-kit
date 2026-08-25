@@ -1,39 +1,40 @@
 #!/usr/bin/env bash
 #
-# Стенд для lib/*.sh. Подменяет sudo/systemctl/caddy/curl стабами (test/stub) и гоняет
-# сценарии на временном DEPLOY_DIR. Инфраструктура не нужна — запускается где угодно за ~2 минуты.
+# The harness for lib/*.sh. It replaces sudo, systemctl, caddy and curl with stubs from test/stub and
+# runs the scenarios against a temporary DEPLOY_DIR. No infrastructure is needed, so it runs anywhere
+# in about two minutes.
 #
-#   test/run.sh
+# test/run.sh
 #
-# Зачем: эти скрипты переключают ПРОД-трафик, и за один день в них нашлось два бага, доехавших
-# до прода (заякоренная на порядок ключей проверка readiness и грep по несуществующей строке
-# в выводе javaToolchains). Проверяются наблюдаемые эффекты — какой цвет перезапущен, куда
-# смотрит апстрим, что лежит в RELEASE, — а не текст сообщений.
+# These scripts switch PRODUCTION traffic, and the failures they hide are silent ones — a readiness
+# check anchored on JSON key order, a grep for a line a tool no longer prints. What is asserted is the
+# observable effect: which colour was restarted, where the upstream points, what RELEASE holds. Never
+# the text of a message.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS="${SCRIPTS:-$(cd "$HERE/../lib" && pwd)}"
-# Профиль сервиса, против которого гоняется стенд. По умолчанию team — эталон, на котором
-# написаны все ассерты ниже; матрица подставляет остальные четыре через PROFILE.
-PROFILE="${PROFILE:-$HERE/profiles/team.conf}"
+# The profile the harness runs against. full.conf is the reference shape every assertion below was
+# written against; matrix.sh substitutes the others through PROFILE.
+PROFILE="${PROFILE:-$HERE/profiles/full.conf}"
 export SERVICE_PROFILE="$PROFILE"
-# Профиль читаем и здесь: ассерты ниже должны говорить портами и именами того сервиса, против
-# которого идёт прогон. Экспорт обязателен — стаб curl это отдельный процесс, без экспорта
-# портов профиля он не увидит и всегда считал бы цвет синим.
-# shellcheck source=profiles/team.conf
+# The profile is read here too: the assertions below have to speak in the ports and names of whichever
+# shape is being run. The export is mandatory — the curl stub is a separate process, and without it
+# the profile's ports would be invisible and every colour would read as blue.
+# shellcheck source=profiles/full.conf
 . "$PROFILE"
 : "${MGMT_PORT_BLUE:=$APP_PORT_BLUE}"
 : "${MGMT_PORT_GREEN:=$APP_PORT_GREEN}"
 export SERVICE_UNIT JAR_NAME APP_PORT_BLUE APP_PORT_GREEN MGMT_PORT_BLUE MGMT_PORT_GREEN
 export SMOKE_PATH="${SMOKE_PATH:-}" SMOKE_EXPECT="${SMOKE_EXPECT:-}"
-# Код, который профиль считает УСПЕШНЫМ ответом пробы, — первый из SMOKE_EXPECT. Раньше стенд
-# зашивал 407 (значение team) и на профиле, принимающем только 200, заваливал штатный деплой.
+# The code this profile treats as a SUCCESSFUL probe is the first of SMOKE_EXPECT. Hard-coding one
+# shape's value fails a perfectly good deploy on a profile that accepts only 200.
 GOOD_PROBE="${SMOKE_EXPECT%% *}"; : "${GOOD_PROBE:=407}"
 printf 'профиль %s: %s, порты %s/%s, смоук %s\n\n' "$(basename "$PROFILE")" "$SERVICE_UNIT" \
     "$APP_PORT_BLUE" "$APP_PORT_GREEN" "${SMOKE_PATH:-нет}"
 PASS=0; FAIL=0
 
-setup() {                       # setup <активный-цвет>
+setup() {                       # setup <active-colour>
     WORK="$(mktemp -d)"
     export DEPLOY_DIR="$WORK" STUB_LOG="$WORK/calls.log" STUB_STATE="$WORK"
     export CADDY_UPSTREAM="$WORK/caddy/active-upstream.caddy" CADDYFILE="$WORK/Caddyfile"
@@ -52,14 +53,14 @@ setup() {                       # setup <активный-цвет>
     export HEALTH_TIMEOUT=6 RESTORE_TIMEOUT=6
 }
 
-check() {                       # check <описание> <ожидание> <факт>
+check() {                       # check <description> <expected> <actual>
     if [ "$2" = "$3" ]; then PASS=$((PASS+1)); printf '  \033[32m✓\033[0m %s\n' "$1"
     else FAIL=$((FAIL+1)); printf '  \033[31m✗\033[0m %s: ждали [%s], получили [%s]\n' "$1" "$2" "$3"; fi
 }
 upstream_port() { sed -n 's#.*:\([0-9]*\)#\1#p' "$CADDY_UPSTREAM"; }
 restarts_of()   { grep -c "systemctl restart $SERVICE_UNIT@$1" "$STUB_LOG" 2>/dev/null | tr -d ' '; }
-# Аргумент — release-id; по умолчанию тот, что ждут ассерты. Ни один сценарий пока его не
-# передаёт, но параметр отражает сигнатуру deploy.sh и нужен сценарию с двумя разными релизами.
+# The argument is a release-id, defaulting to the one the assertions expect. No scenario passes it
+# yet, but the parameter mirrors deploy.sh's signature and a two-release scenario needs it.
 # shellcheck disable=SC2120
 deploy()        { bash "$SCRIPTS/deploy.sh" "$DEPLOY_DIR/new.jar" "${1:-abc123456789}" 2>&1; }
 
@@ -220,8 +221,9 @@ echo "17. откат из установленного bin, без единой 
 setup blue
 export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
 deploy >/dev/null 2>&1
-# Дежурный в три часа ночи знает только путь /opt/<сервис>/bin/rollback.sh. Ни SERVICE_PROFILE,
-# ни расположение чекаута action'а ему не известны — профиль скрипт обязан найти рядом с собой.
+# On-call at three in the morning knows only the path /opt/<service>/bin/rollback.sh. Neither
+# SERVICE_PROFILE nor where the action's checkout landed is known to them, so the script has to find
+# its profile beside itself.
 out="$(env -u SERVICE_PROFILE PATH="$HERE/stub:$PATH" DEPLOY_DIR="$DEPLOY_DIR" \
        STUB_LOG="$STUB_LOG" STUB_STATE="$STUB_STATE" STUB_READY="blue green" \
        CADDY_UPSTREAM="$CADDY_UPSTREAM" CADDYFILE="$CADDYFILE" HEALTH_TIMEOUT=6 \
@@ -234,9 +236,9 @@ check "active обновлён"                "blue" "$(cat "$DEPLOY_DIR/active
 echo "18. каталог сервиса недоступен раннеру на запись (лок не создать)"
 setup blue
 export STUB_READY="blue green" STUB_INFO_COMMIT=abc123456789ff STUB_PROBE_CODE=$GOOD_PROBE STUB_ADMIN_PORT=$APP_PORT_GREEN
-# Права на $DEPLOY_DIR — забота хоста, и на трёх из пяти прод-хостов записи там у раннера нет.
-# Отказ в этом месте означал бы «сервис нельзя выкатить вообще», поэтому выкат обязан пройти,
-# громко предупредив: теряется только взаимоисключение с ручным откатом.
+# Permissions on $DEPLOY_DIR are the host's business, and on most production hosts the runner cannot
+# write there. Refusing here would mean the service cannot be deployed at all, so the rollout has to
+# proceed with a loud warning: the only thing lost is exclusion against a manual rollback.
 export LOCK_FILE=/nonexistent-dir/switch.lock
 out="$(deploy)"; rc=$?
 unset LOCK_FILE

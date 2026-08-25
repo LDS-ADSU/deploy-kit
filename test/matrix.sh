@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Прогон стенда по ВСЕМ профилям сразу — то, ради чего кит и заводился: одна реализация
-# blue-green, проверенная на всех пяти сервисах, вместо пяти копий, проверенных на одном.
+# Runs the harness against EVERY profile at once — the point of the kit: one blue-green implementation
+# checked against all five services, instead of five copies each checked against one.
 #
 #   test/matrix.sh
 #
-# Печатает по строке на профиль. Полный вывод — только у упавшего, иначе пять прогонов
-# превращают лог в простыню, в которой единственная красная строка теряется.
+# One line per profile. Full output only for a failure, or five runs turn the log into a wall in which
+# the single red line is lost.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rc_all=0
