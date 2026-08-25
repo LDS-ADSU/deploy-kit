@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
-# Общие примитивы blue-green для deploy.sh / rollback.sh / release.sh.
-# Подключается через `source`, самостоятельного запуска не предполагает.
+# The blue-green primitives shared by deploy.sh, rollback.sh and release.sh.
+# Sourced, never run on its own.
 #
-# Здесь собрано ровно то, что раньше дублировалось между deploy.sh и rollback.sh и в двух копиях
-# разъезжалось (разные бюджеты health-check, разные эндпоинты, разный порядок записи состояния).
+# Everything here has to live in one place: kept as two copies in deploy.sh and rollback.sh, these
+# drift — different health-check budgets, different endpoints, a different order of writing state.
 
 # The service profile is the only thing that differs between the five backends. It is a
 # sourced shell file of `: "${KEY:=value}"` assignments, so the ENVIRONMENT always wins over
 # the profile — deploy.yml keeps passing DEPLOY_DIR and the test harness keeps pointing the
 # whole thing at a temporary directory, and neither has to learn that profiles exist.
-# Рядом с установленной копией скриптов лежит service.conf (см. install_bin в deploy.sh),
-# поэтому /opt/backend/<сервис>/bin/rollback.sh запускается дежурным без единой переменной
-# окружения. Условие через `if`, а не `[ ] && [ ] && VAR=`: последнее под set -e уронило бы
-# скрипт, когда первая проверка ложна.
+# service.conf sits next to the installed copy of the scripts (see install_bin in deploy.sh), so
+# /opt/backend/<service>/bin/rollback.sh runs for on-call with no environment variables at all.
+# Written as an `if` rather than `[ ] && [ ] && VAR=`: the latter kills the script under set -e when
+# the first test is false.
 if [ -z "${SERVICE_PROFILE:-}" ]; then
     _kit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [ -r "$_kit_dir/service.conf" ]; then SERVICE_PROFILE="$_kit_dir/service.conf"; fi
@@ -21,11 +21,11 @@ if [ -z "${SERVICE_PROFILE:-}" ]; then
 fi
 : "${SERVICE_PROFILE:?не задан SERVICE_PROFILE — укажите путь к service.conf сервиса}"
 [ -r "$SERVICE_PROFILE" ] || { echo "!! профиль $SERVICE_PROFILE не читается" >&2; exit 1; }
-# Приводим к абсолютному: install_bin копирует профиль на хост, а deploy.sh мог быть запущен
-# из любого каталога — относительный путь после смены cwd указывал бы в никуда.
+# Made absolute: install_bin copies the profile to the host, and deploy.sh may have been started from
+# any directory — a relative path would point nowhere once the working directory changes.
 SERVICE_PROFILE="$(cd "$(dirname "$SERVICE_PROFILE")" && pwd)/$(basename "$SERVICE_PROFILE")"
-# Линтуем против примера профиля, а не против /dev/null: иначе shellcheck считает SERVICE_UNIT,
-# JAR_NAME и порты неприсвоенными (SC2154) во всех четырёх скриптах сразу.
+# Linted against the example profile rather than /dev/null: otherwise shellcheck reports SERVICE_UNIT,
+# JAR_NAME and the ports as unassigned (SC2154) in all four scripts at once.
 # shellcheck source=../service.conf.example
 . "$SERVICE_PROFILE"
 
@@ -55,37 +55,37 @@ other()     { case "$1" in blue) echo green;; green) echo blue;; esac; }
 
 release_of() { cat "$DEPLOY_DIR/$1/RELEASE" 2>/dev/null || echo '?'; }
 
-# Единый словарь сообщений. Префикс сразу говорит, чем кончится дело, — это важно при разборе
-# инцидента: `grep '!!'` в логе Actions должен давать ТОЛЬКО то, из-за чего работа прекратилась,
-# а не вперемешку с безобидными замечаниями.
-#   step — очередной шаг, всё идёт по плану
-#   warn — работа продолжается, но человеку стоит об этом знать
-#   die  — отказ, дальше скрипт не идёт
-# Продолжение любой из них — cont (отступ), чтобы фраза не рвалась между двумя echo.
-# Голос везде один: первое лицо единственного числа («раскатываю», «жду», «возвращаю»),
-# к читателю — на «вы».
+# One vocabulary for messages. The prefix says up front how the run ends, which is what matters while
+# triaging an incident: `grep '!!'` over an Actions log must return ONLY what stopped the work, not
+# harmless remarks mixed in with it.
+# step — another step, going to plan
+# warn — the run continues, but someone should know
+# die  — a refusal; the script goes no further
+# A continuation of any of them is cont, indented, so a sentence does not break across two echoes.
+# The messages stay Russian and keep one voice: first person singular for what the script does, and
+# the formal second person for the reader.
 step() { echo ">> $*"; }
 warn() { echo ">> ВНИМАНИЕ: $*"; }
 die()  { echo "!! $*" >&2; }
 cont() { echo "   $*"; }
 
-# Взаимоисключение деплоя и ручного отката: оба переписывают апстрим Caddy и оба зовут reload.
-# `concurrency` в deploy.yml сериализует только прогоны Actions и про дежурного, запустившего
-# rollback.sh руками посреди деплоя, ничего не знает.
+# Mutual exclusion between a deploy and a manual rollback: both rewrite the Caddy upstream and both
+# call reload. `concurrency` in deploy.yml serialises only Actions runs and knows nothing about
+# on-call starting rollback.sh by hand in the middle of a deploy.
 acquire_switch_lock() {
     if ! command -v flock >/dev/null 2>&1; then
         warn "flock не найден: одновременный запуск деплоя и отката ничем не разведён"
         return 0
     fi
-    # Файл заводим групповым и открываем на ЧТЕНИЕ: flock прав на запись не требует, а лок,
-    # созданный под одним пользователем с umask 022, иначе заблокировал бы всех остальных.
+    # The file is group-writable and opened for READING: flock needs no write permission, and a lock
+    # created by one user under umask 022 would otherwise shut everyone else out.
     #
-    # Не удалось создать — значит у пользователя раннера нет записи в САМ $DEPLOY_DIR. Это дефект
-    # прав на хосте, а не повод остановить выкат: без лока теряется только взаимоисключение
-    # деплоя и РУЧНОГО отката (параллельные деплои и так сериализует `concurrency` в workflow),
-    # тогда как отказ здесь означает, что сервис нельзя выкатить вообще. Поэтому предупреждаем
-    # громко и с готовой командой починки. Ровно тот же выбор уже сделан ниже по тексту для
-    # отсутствующего flock.
+    # Failing to create it means the runner's user cannot write to $DEPLOY_DIR itself. That is a
+    # permissions defect on the host, not a reason to stop the rollout: without the lock the only thing
+    # lost is exclusion against a MANUAL rollback — parallel deploys are already serialised by
+    # `concurrency` in the workflow — whereas refusing here means the service cannot be deployed at all.
+    # So it warns loudly and prints the command that fixes it. The same choice is made below for a missing
+    # flock.
     if ! { ( umask 0002; : >> "$LOCK_FILE" ) 2>/dev/null && [ -r "$LOCK_FILE" ]; }; then
         warn "не удалось создать файл блокировки $LOCK_FILE — продолжаю БЕЗ взаимоисключения."
         cont "Ручной откат, запущенный посреди этого деплоя, ничем не разведён с ним."
@@ -97,16 +97,16 @@ acquire_switch_lock() {
     flock -n 9 || { die "деплой или откат уже выполняется — прерываю (блокировка $LOCK_FILE)"; exit 1; }
 }
 
-# Активный цвет — тот, на который РЕАЛЬНО смотрит Caddy. Файл `active` справочный: он пишется
-# уже после `caddy reload`, поэтому отстаёт при сбое записи и при ручной правке апстрима в
-# инциденте. Ошибка здесь — самая дорогая из возможных: рестарт активного цвета означает
-# простой на всё время старта JVM, ровно посреди «безопасного» blue-green.
+# The active colour is the one Caddy REALLY points at. The `active` file is advisory: it is written
+# after `caddy reload`, so it lags behind a failed write and behind a hand-edited upstream during an
+# incident. Getting this wrong is the most expensive mistake available: restarting the active colour
+# is an outage for the whole JVM start, in the middle of a supposedly safe blue-green.
 detect_active() {
     local port color noted
-    # Порт якорим на КОНЕЦ строки и берём только незакомментированные директивы `to`,
-    # иначе комментарий или порт вида 23331 дали бы неверный цвет. Ширина 2–5 цифр, а не ровно
-    # четыре: у сервиса вполне может оказаться пятизначный порт, и жёсткая четвёрка отрезала бы
-    # его молча — деплой встал бы на «не могу определить активный цвет» при здоровом хосте.
+    # The port is anchored to the END of the line and only uncommented `to` directives count, or a comment
+    # or a port such as 23331 would yield the wrong colour. The width is 2-5 digits rather than exactly
+    # four: a service may well have a five-digit port, and a hard four would cut it off silently — the
+    # deploy would stop at "cannot determine the active colour" on a perfectly healthy host.
     port="$(grep -E '^[[:space:]]*to[[:space:]]' "$CADDY_UPSTREAM" 2>/dev/null \
         | sed -n 's/.*127\.0\.0\.1:\([0-9]\{2,5\}\)[[:space:]]*$/\1/p' | head -n1)"
     case "$port" in
@@ -128,24 +128,23 @@ detect_active() {
     echo "$color"
 }
 
-# Готовность цвета проверяем по ГРУППЕ readiness (readinessState + r2dbc), а не по агрегату
-# /actuator/health: в агрегат входят redis и diskSpace, из-за которых деплой полностью
-# работоспособного инстанса упирается в недоступный кэш.
+# Readiness is checked through the readiness GROUP, not the /actuator/health aggregate: the aggregate
+# includes redis and diskSpace, which would block the deploy of a fully working instance on an
+# unreachable cache.
 #
-# Основной гейт — HTTP-код: Actuator отдаёт 200 на UP и 503 на DOWN/OUT_OF_SERVICE.
-# Тело проверяем ДОПОЛНИТЕЛЬНО и только на отсутствие не-UP статусов — чтобы отсечь UNKNOWN,
-# который тоже маппится в 200.
+# The HTTP code is the gate: Actuator answers 200 for UP and 503 for DOWN or OUT_OF_SERVICE. The body
+# is checked in addition, and only for the absence of non-UP statuses, to catch UNKNOWN — which also
+# maps to 200.
 #
-# Никаких предположений о ПОРЯДКЕ ключей: группа readiness наследует show-details: always и
-# реально отвечает `{"components":{...},"status":"UP"}`, то есть components ПЕРВЫМ ключом.
-# Якорь на `^{"status":"UP"` из-за этого проваливал проверку у полностью здорового инстанса —
-# деплой fde2b3a простоял 600с и откатился, хотя приложение работало (порядок ключей в JSON
-# не гарантирован ничем, и полагаться на него нельзя).
+# Nothing may assume key ORDER. The readiness group inherits show-details: always and answers
+# `{"components":{...},"status":"UP"}` — components first. Anchoring on `^{"status":"UP"` therefore
+# fails against a completely healthy instance, and the deploy sits out its whole budget before rolling
+# back. JSON guarantees no key order at all.
 is_healthy() {
     local url resp code body
     url="http://127.0.0.1:$(mgmt_port "$1")/actuator/health/readiness"
-    # Код дописываем в хвост тела без разделителя и отрезаем позиционно: формат -w без
-    # escape-последовательностей не зависит от того, как их раскрывает конкретный curl.
+    # The code is appended to the body with no separator and cut off by position: a -w format without
+    # escape sequences does not depend on how a particular curl expands them.
     resp="$(curl -s --max-time 5 -w '%{http_code}' "$url" 2>/dev/null)" || return 1
     code="${resp: -3}"
     body="${resp%???}"
@@ -156,9 +155,9 @@ is_healthy() {
     return 0
 }
 
-# Ждём готовности до дедлайна, но выходим раньше, если systemd успел перезапустить юнит:
-# Restart=on-failure означает, что упавшая на старте сборка будет подниматься снова и снова,
-# и досиживать бюджет до конца бессмысленно.
+# Waits for readiness until the deadline, but leaves early once systemd has restarted the unit:
+# Restart=on-failure means a build that dies at startup will come up again and again, so sitting out
+# the rest of the budget proves nothing.
 wait_healthy() {
     local color="$1" timeout="${2:-$HEALTH_TIMEOUT}" unit deadline nr0 nr
     unit="$SERVICE_UNIT@$color"
@@ -166,9 +165,10 @@ wait_healthy() {
     deadline=$(( $(date +%s) + timeout ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         if is_healthy "$color"; then return 0; fi
-        # Одиночный авто-рестарт переживаем: приложение могло упасть на транзиентной
-        # недоступности БД и подняться со второй попытки. Два и больше — это цикл.
-        # Значения проверяем на числовость: нечисловая строка в $(( )) под set -u убила бы скрипт.
+        # A single automatic restart is tolerated: the application may have died on a transient database
+        # outage and come up on the second try. Two or more is a loop.
+        # The values are checked for being numeric: a non-numeric string inside $(( )) under set -u would kill
+        # the script.
         nr="$(systemctl show -p NRestarts --value "$unit" 2>/dev/null || true)"
         case "$nr0$nr" in *[!0-9]*|'') nr='' ;; esac
         if [ -n "$nr" ] && [ "$((nr - nr0))" -ge 2 ]; then
@@ -181,11 +181,12 @@ wait_healthy() {
     return 1
 }
 
-# Диагностика цвета, не прошедшего гейт готовности. Сам факт «не поднялся за N секунд» не
-# различает два совершенно разных случая: приложение не слушает вовсе — или слушает и
-# осознанно отвечает DOWN (например, недоступна БД в группе readiness). Без этого разбор
-# требует человека с ssh на прод-хосте, что превращает любой красный деплой в переписку.
-# Всё best-effort: диагностика не имеет права влиять на код возврата.
+# Diagnostics for a colour that failed the readiness gate. "Did not come up in N seconds" does not
+# separate two very different cases: the application is not listening at all, or it is listening and
+# deliberately answering DOWN — an unreachable database in the readiness group, say. Without this,
+# triage needs someone with ssh on the production host, which turns every red deploy into a
+# conversation.
+# All of it is best-effort: diagnostics must never affect the exit code.
 diagnose_color() {
     local color="$1" mport aport
     mport="$(mgmt_port "$color")"; aport="$(app_port "$color")"
@@ -198,8 +199,8 @@ diagnose_color() {
         echo "     код: $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || echo 'нет соединения')"
         echo "     тело: $(curl -s --max-time 5 "$url" 2>/dev/null | head -c 600 || true)"
     done
-    # Смоук-путь есть не у каждого сервиса: без него по app-порту стучаться некуда, и строка
-    # просто не печатается — лучше, чем показывать 404 на выдуманном пути.
+    # Not every service has a smoke path. Without one there is nothing to call on the app port, and the
+    # line is simply not printed — better than showing a 404 for a path that was invented here.
     if [ -n "${SMOKE_PATH:-}" ]; then
         echo "   app-порт $aport: код $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
             "http://127.0.0.1:$aport$SMOKE_PATH" 2>/dev/null || echo 'нет соединения')"
@@ -209,8 +210,8 @@ diagnose_color() {
     echo "-------------------------------------------------------------------------"
 }
 
-# Апстрим пишем через временный файл: Caddy может читать его в момент правки, а частично
-# записанный `to 127.0.0.1:23` уронит reload.
+# The upstream is written through a temporary file: Caddy may read it while it is being edited, and a
+# half-written `to 127.0.0.1:23` fails the reload.
 switch_upstream() {
     printf 'to 127.0.0.1:%s\n' "$(app_port "$1")" > "$CADDY_UPSTREAM.tmp"
     chmod 0644 "$CADDY_UPSTREAM.tmp"
@@ -219,10 +220,10 @@ switch_upstream() {
 
 reload_caddy() { caddy reload --config "$CADDYFILE" --adapter caddyfile; }
 
-# Переключение трафика ВСЕГДА через этот примитив: апстрим-файл — источник правды об активном
-# цвете (см. detect_active), поэтому он не должен переживать неудавшийся reload ни на секунду.
-# Иначе следующий деплой посчитает боевым не тот цвет и перезапустит его под нагрузкой.
-# apply_upstream <новый-цвет> <прежний-цвет>
+# Traffic is switched ALWAYS through this primitive. The upstream file is the source of truth for the
+# active colour (see detect_active), so it must not outlive a failed reload for even a second —
+# otherwise the next deploy takes the wrong colour for live and restarts it under load.
+# apply_upstream <new-colour> <previous-colour>
 apply_upstream() {
     switch_upstream "$1"
     if ! reload_caddy; then
@@ -233,8 +234,8 @@ apply_upstream() {
     fi
 }
 
-# `active` — справочный файл (источник правды см. detect_active), поэтому неудачная запись
-# не должна ронять скрипт: трафик к этому моменту уже переключён.
+# `active` is advisory — the source of truth is detect_active — so a failed write must not fail the
+# script: traffic has already been switched by this point.
 record_active() {
     printf '%s\n' "$1" > "$ACTIVE_FILE" 2>/dev/null \
         || warn "не удалось обновить $ACTIVE_FILE. Файл справочный, трафик уже на $1"

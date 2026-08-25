@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# Мгновенный откат blue-green: переключить Caddy на другой цвет (тёплый резерв, на котором ещё
-# крутится предыдущая версия). Резерв работает постоянно, поэтому в норме откат — это один
-# `caddy reload`, без рестарта и без простоя.
+# Instant blue-green rollback: point Caddy at the other colour, the warm reserve still running the
+# previous version. The reserve runs continuously, so a rollback is normally a single `caddy reload` —
+# no restart and no downtime.
 #
-# Рестартуем резерв ТОЛЬКО если он не отвечает: гасить живой резерв в аварийной ситуации — худшее
-# из возможных действий, пока он поднимается, откатываться будет некуда.
+# The reserve is restarted ONLY if it does not answer: taking down a live reserve during an incident is
+# the worst available move, because while it comes up there is nowhere to roll back to.
 #
-# Откат работает «на один шаг назад». Если оба цвета уже несут новый код (два деплоя подряд),
-# нужен откат на конкретную сборку из архива — deploy/release.sh <release-id>.
+# A rollback goes exactly one step back. If both colours already carry new code — two deploys in a row
+# — the way back to a particular build is deploy/release.sh <release-id>.
 #
-# Использование: deploy/rollback.sh
-# Переменные: HEALTH_TIMEOUT (сек, 600)
+# Usage: deploy/rollback.sh
+# Variables: HEALTH_TIMEOUT (seconds, 600)
 set -euo pipefail
 
 # shellcheck source=lib.sh
@@ -23,8 +23,8 @@ active="$(detect_active)"
 target="$(other "$active")"
 step "откат: $active ($(release_of "$active")) → $target ($(release_of "$target"))"
 
-# Решение «рестартовать резерв или нет» принимаем не по одной пробе: единичный таймаут на
-# занятом хосте иначе стоил бы нам как раз того, ради чего этот скрипт и переписан.
+# Whether to restart the reserve is not decided on one probe: a single timeout on a busy host would
+# otherwise cost exactly the thing this script exists to protect.
 healthy=0
 for _ in 1 2 3; do
     if is_healthy "$target"; then healthy=1; break; fi

@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# Выкатка КОНКРЕТНОЙ сборки из архива (deploy/releases/<release-id>.jar) через обычный
-# blue-green цикл deploy.sh.
+# Deploys a SPECIFIC build out of the archive (deploy/releases/<release-id>.jar) through the ordinary
+# blue-green cycle in deploy.sh.
 #
-# Зачем, если есть rollback.sh: тот умеет только «переключиться на другой цвет», то есть ровно на
-# один шаг назад. После двух деплоёв подряд оба цвета уже несут новый код, и вернуться на нужную
-# версию можно только отсюда.
+# Why this exists alongside rollback.sh: that one can only switch to the other colour, which is exactly
+# one step back. After two deploys in a row both colours carry new code, and the only way back to a
+# particular version is from here.
 #
-# Использование:
-#   deploy/release.sh --list          # что есть в архиве и что сейчас на цветах
-#   deploy/release.sh <release-id>    # выкатить эту сборку в standby и переключить трафик
+# Usage:
+# deploy/release.sh --list          # what the archive holds and what each colour runs
+# deploy/release.sh <release-id>    # deploy that build to standby and switch traffic
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
-source "$HERE/lib.sh"       # даёт DEPLOY_DIR из профиля и проверяет, что профиль полон
+source "$HERE/lib.sh"       # supplies DEPLOY_DIR from the profile and checks the profile is complete
 RELEASES_DIR="$DEPLOY_DIR/releases"
 
 list_releases() {
